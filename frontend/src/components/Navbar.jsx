@@ -249,6 +249,12 @@ export default function Navbar({ title, session, onOpenLogin }) {
       <div className="top-header-right">
         <div className="header-search-wrap" ref={containerRef}>
           <form className="header-search" onSubmit={handleSearch} role="search">
+            <button type="submit" className="header-search-submit" aria-label="Submit search" style={{ order: -1 }}>
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#9ca3af" strokeWidth="2">
+                <circle cx="11" cy="11" r="8" />
+                <path d="M21 21l-4.35-4.35" />
+              </svg>
+            </button>
             <input
               type="text"
               placeholder="Search devices, users, or alerts"
@@ -274,12 +280,6 @@ export default function Navbar({ title, session, onOpenLogin }) {
                 ×
               </button>
             )}
-            <button type="submit" className="header-search-submit" aria-label="Submit search">
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#6b7280" strokeWidth="2">
-                <circle cx="11" cy="11" r="8" />
-                <path d="M21 21l-4.35-4.35" />
-              </svg>
-            </button>
           </form>
 
           {open && query.trim() && (
@@ -319,16 +319,30 @@ export default function Navbar({ title, session, onOpenLogin }) {
           className="icon-btn"
           title="View Security Alerts"
           onClick={() => navigate('/threats')}
+          style={{ position: 'relative' }}
         >
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
             <path d="M18 8a6 6 0 00-12 0c0 7-3 9-3 9h18s-3-2-3-9m-4.27 13a2 2 0 01-3.46 0" />
           </svg>
         </button>
 
+        {/* Light / dark placeholder (cosmetic, like Dealport) */}
+        <button
+          type="button"
+          className="icon-btn"
+          title="Display settings"
+          style={{ color: '#9ca3af' }}
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="12" cy="12" r="4" />
+            <path d="M12 2v2M12 20v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M2 12h2M20 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42" />
+          </svg>
+        </button>
+
         <button
           type="button"
           className="avatar-circle"
-          style={{ border: 'none', cursor: 'pointer' }}
+          style={{ border: 'none', cursor: 'pointer', fontSize: '13px', fontWeight: 700 }}
           title={`Signed in as ${session?.username} (${session?.role})`}
           onClick={onOpenLogin}
         >

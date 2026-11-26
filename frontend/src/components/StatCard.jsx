@@ -8,7 +8,22 @@ export default function StatCard({ label, value, meta, delta, deltaTone = 'up' }
     <div className="kpi-card">
       <div className="kpi-top">
         <span className="kpi-title">{label}</span>
-        <span style={{ color: '#9ca3af', fontWeight: 700, fontSize: '14px' }}>⋮</span>
+        <button
+          type="button"
+          style={{
+            border: 'none',
+            background: 'transparent',
+            color: '#d1d5db',
+            fontWeight: 700,
+            fontSize: '16px',
+            cursor: 'pointer',
+            padding: '0 2px',
+            lineHeight: 1,
+          }}
+          aria-label="More options"
+        >
+          ⋮
+        </button>
       </div>
       <div className="kpi-value-row">
         <span className="kpi-value">{value}</span>
