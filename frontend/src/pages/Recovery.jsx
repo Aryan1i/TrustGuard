@@ -16,9 +16,9 @@ export default function Recovery({ session }) {
   const [notice, setNotice] = useState('');
   const [restoreTarget, setRestoreTarget] = useState(null);
 
-  const load = async () => {
+  const load = async (clearError = true) => {
     setLoading(true);
-    setError('');
+    if (clearError) setError('');
     try {
       const res = await api.getBackups();
       setBackups(res);
@@ -91,7 +91,7 @@ export default function Recovery({ session }) {
     } catch (err) {
       setError(err.message);
       setRestoreTarget(null);
-      await load();
+      await load(false);
     } finally {
       setBusy(false);
     }

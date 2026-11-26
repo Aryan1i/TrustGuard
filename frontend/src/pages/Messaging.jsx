@@ -23,9 +23,9 @@ export default function Messaging({ session }) {
   const [tamperRecipient, setTamperRecipient] = useState(false);
   const [tamperCiphertext, setTamperCiphertext] = useState(false);
 
-  const load = async () => {
+  const load = async (clearError = true) => {
     setLoading(true);
-    setError('');
+    if (clearError) setError('');
     try {
       const [msgs, sess, us, metrics] = await Promise.all([
         api.getMessages(),
@@ -78,8 +78,9 @@ export default function Messaging({ session }) {
       setDeliveryResult(res);
       await load();
     } catch (err) {
+      setDeliveryResult(null);
       setError(err.message);
-      await load();
+      await load(false);
     } finally {
       setBusy(false);
     }

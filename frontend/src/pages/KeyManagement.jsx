@@ -18,9 +18,9 @@ export default function KeyManagement({ session }) {
   const [busy, setBusy] = useState(false);
   const [commitCandidate, setCommitCandidate] = useState(null);
 
-  const load = async () => {
+  const load = async (clearError = true) => {
     setLoading(true);
-    setError('');
+    if (clearError) setError('');
     try {
       const res = await api.getRotationStatus();
       setStatusData(res);
@@ -85,7 +85,7 @@ export default function KeyManagement({ session }) {
     } catch (err) {
       setError(err.message);
       setCommitCandidate(null);
-      await load();
+      await load(false);
     } finally {
       setBusy(false);
     }
