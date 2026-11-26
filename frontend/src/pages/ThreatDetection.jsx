@@ -1,4 +1,5 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
+import { useLocation } from 'react-router-dom';
 import { api } from '../api';
 import StatCard from '../components/StatCard';
 import AlertCard from '../components/AlertCard';
@@ -8,12 +9,20 @@ import LoadingState from '../components/LoadingState';
 import { formatUtcIso } from '../dateUtils';
 
 export default function ThreatDetection() {
+  const location = useLocation();
+  const urlQuery = useMemo(() => new URLSearchParams(location.search).get('q') || '', [location.search]);
+
   const [evaluation, setEvaluation] = useState(null);
   const [alerts, setAlerts] = useState([]);
   const [severityFilter, setSeverityFilter] = useState('ALL');
+  const [alertQuery, setAlertQuery] = useState(urlQuery);
   const [loading, setLoading] = useState(true);
   const [running, setRunning] = useState(false);
   const [error, setError] = useState('');
+
+  useEffect(() => {
+    setAlertQuery(urlQuery);
+  }, [urlQuery]);
 
   const runAndLoad = async () => {
     setRunning(true);
@@ -37,7 +46,14 @@ export default function ThreatDetection() {
   if (loading && !evaluation) return <LoadingState />;
 
   const metrics = evaluation?.postDetectionEvaluation;
-  const filteredAlerts = alerts.filter((a) => severityFilter === 'ALL' || a.severity === severityFilter);
+  const qLower = alertQuery.trim().toLowerCase();
+  const filteredAlerts = alerts.filter((a) => {
+    const matchesSeverity = severityFilter === 'ALL' || a.severity === severityFilter;
+    if (!matchesSeverity) return false;
+    if (!qLower) return true;
+    const hay = `${a.alertUid || ''} ${a.ruleName || ''} ${a.actor || ''} ${a.severity || ''} ${a.servicePath || ''} ${a.explanation || ''} ${a.eventIdsJson || ''}`.toLowerCase();
+    return hay.includes(qLower);
+  });
 
   return (
     <div>
@@ -73,14 +89,32 @@ export default function ThreatDetection() {
               </button>
             ))}
           </div>
-          <span style={{ fontSize: '12.5px', color: 'var(--text-muted)' }}>
-            Showing {filteredAlerts.length} alert(s)
-          </span>
+          <div className="flex-row">
+            <div className="table-search">
+              <input
+                type="text"
+                placeholder="Filter alerts..."
+                value={alertQuery}
+                onChange={(e) => setAlertQuery(e.target.value)}
+              />
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#6b7280" strokeWidth="2">
+                <circle cx="11" cy="11" r="8" />
+                <path d="M21 21l-4.35-4.35" />
+              </svg>
+            </div>
+            <span style={{ fontSize: '12.5px', color: 'var(--text-muted)' }}>
+              {filteredAlerts.length} alert(s)
+            </span>
+          </div>
         </div>
 
-        {filteredAlerts.map((alert) => (
-          <AlertCard key={alert.alertUid} alert={alert} />
-        ))}
+        {filteredAlerts.length === 0 ? (
+          <div className="empty-state">No alerts match the current severity or search filter.</div>
+        ) : (
+          filteredAlerts.map((alert) => (
+            <AlertCard key={alert.alertUid} alert={alert} />
+          ))
+        )}
       </div>
 
       <div className="card">

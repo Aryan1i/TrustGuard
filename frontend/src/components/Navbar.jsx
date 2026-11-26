@@ -119,7 +119,7 @@ export default function Navbar({ title, session, onOpenLogin }) {
           badge: a.severity || 'ALERT',
           title: `${a.ruleName || 'Security Alert'} · ${a.actor || '—'}`,
           subtitle: `${a.alertUid || ''} · ${a.explanation ? a.explanation.slice(0, 72) : a.servicePath || ''}`,
-          to: `/threats?q=${encodeURIComponent(a.alertUid || a.actor || query.trim())}`,
+          to: `/threats?q=${encodeURIComponent(a.actor || a.alertUid || query.trim())}`,
         });
       }
     });
