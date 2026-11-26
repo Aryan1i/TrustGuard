@@ -1,5 +1,6 @@
 import React from 'react';
 import StatusBadge from './StatusBadge';
+import { formatUtcIso } from '../dateUtils';
 
 export default function AlertCard({ alert }) {
   return (
@@ -11,7 +12,7 @@ export default function AlertCard({ alert }) {
           <strong className="mono">{alert.ruleName}</strong>
         </div>
         <span className="mono" style={{ color: 'var(--text-muted)' }}>
-          {alert.timestamp ? new Date(alert.timestamp).toISOString() : ''}
+          {alert.timestamp ? formatUtcIso(alert.timestamp) : ''}
         </span>
       </div>
       <p style={{ margin: '0 0 8px', fontSize: '13.5px', lineHeight: 1.5 }}>{alert.explanation}</p>

@@ -5,6 +5,7 @@ import DataTable from '../components/DataTable';
 import StatusBadge, { DotStatus } from '../components/StatusBadge';
 import ConfirmModal from '../components/ConfirmModal';
 import LoadingState from '../components/LoadingState';
+import { formatUtcDate } from '../dateUtils';
 
 export default function Devices({ session }) {
   const [devices, setDevices] = useState([]);
@@ -231,7 +232,7 @@ export default function Devices({ session }) {
             {
               key: 'enrolledAt',
               header: 'Enrolled',
-              render: (d) => <span className="mono">{new Date(d.enrolledAt).toISOString().slice(0, 10)}</span>,
+              render: (d) => <span className="mono">{formatUtcDate(d.enrolledAt)}</span>,
             },
             {
               key: 'trust',

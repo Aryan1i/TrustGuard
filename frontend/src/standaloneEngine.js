@@ -661,7 +661,18 @@ export const standaloneEngine = {
       openAlertsBySeverity: bySev,
       allowedAccessCount: state.accessEvents.filter((e) => e.decision === 'ALLOW').length,
       deniedAccessCount: state.accessEvents.filter((e) => e.decision === 'DENY').length,
-      recentEvents: [...state.auditLogs].reverse().slice(0, 8),
+      recentEvents: [...state.auditLogs]
+        .reverse()
+        .slice(0, 8)
+        .map((a) => ({
+          eventId: a.eventId,
+          seqNumber: a.seqNumber,
+          actor: a.actor,
+          action: a.action,
+          resource: a.resource,
+          detail: a.detail,
+          timestampUtc: a.eventTimestampUtc,
+        })),
       metricsSummary,
       generatedAt: new Date().toISOString(),
     };

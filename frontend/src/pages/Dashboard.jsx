@@ -6,6 +6,7 @@ import StatusBadge, { DotStatus } from '../components/StatusBadge';
 import DataTable from '../components/DataTable';
 import MetricCard from '../components/MetricCard';
 import LoadingState from '../components/LoadingState';
+import { formatUtc } from '../dateUtils';
 
 export default function Dashboard() {
   const [data, setData] = useState(null);
@@ -134,7 +135,7 @@ export default function Dashboard() {
               {
                 key: 'timestampUtc',
                 header: 'Date',
-                render: (r) => <span className="mono">{new Date(r.timestampUtc).toISOString().slice(0, 19).replace('T', ' ')}</span>,
+                render: (r) => <span className="mono">{formatUtc(r.timestampUtc || r.eventTimestampUtc)}</span>,
               },
               {
                 key: 'detail',

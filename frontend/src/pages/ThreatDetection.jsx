@@ -5,6 +5,7 @@ import DataTable from '../components/DataTable';
 import StatusBadge from '../components/StatusBadge';
 import MetricCard from '../components/MetricCard';
 import LoadingState from '../components/LoadingState';
+import { formatUtcIso } from '../dateUtils';
 
 export default function ThreatDetection() {
   const [evaluation, setEvaluation] = useState(null);
@@ -125,9 +126,9 @@ export default function ThreatDetection() {
             { key: 'actor', header: 'Actor', render: (r) => <span className="mono">{r.actor}</span> },
             { key: 'edge', header: 'Service Edge', render: (r) => <span className="mono">{r.sourceService} → {r.targetService} ({r.action})</span> },
             { key: 'outcome', header: 'Outcome', render: (r) => <StatusBadge status={r.outcome === 'deny' ? 'DENY' : 'ALLOW'} /> },
-            { key: 'rawEventTimeUtc', header: 'Raw Event Time', render: (r) => <span className="mono">{new Date(r.rawEventTimeUtc).toISOString()}</span> },
+            { key: 'rawEventTimeUtc', header: 'Raw Event Time', render: (r) => <span className="mono">{formatUtcIso(r.rawEventTimeUtc)}</span> },
             { key: 'sourceClockOffsetMs', header: 'Clock Offset', render: (r) => `${r.sourceClockOffsetMs} ms` },
-            { key: 'correctedEventTimeUtc', header: 'Corrected Time', render: (r) => <span className="mono">{new Date(r.correctedEventTimeUtc).toISOString()}</span> },
+            { key: 'correctedEventTimeUtc', header: 'Corrected Time', render: (r) => <span className="mono">{formatUtcIso(r.correctedEventTimeUtc)}</span> },
             { key: 'deliveryDelayMs', header: 'Collector Delay', render: (r) => `${r.deliveryDelayMs} ms` },
             {
               key: 'outOfOrderArrival',

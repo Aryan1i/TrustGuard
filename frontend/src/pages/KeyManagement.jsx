@@ -5,6 +5,7 @@ import StatusBadge from '../components/StatusBadge';
 import Timeline from '../components/Timeline';
 import ConfirmModal from '../components/ConfirmModal';
 import LoadingState from '../components/LoadingState';
+import { formatUtcIso } from '../dateUtils';
 
 export default function KeyManagement({ session }) {
   const [statusData, setStatusData] = useState(null);
@@ -130,7 +131,7 @@ export default function KeyManagement({ session }) {
         title: `Key v${v.versionNumber} Retired / Cutoff Boundary`,
         status: 'RETIRED',
         timestamp: v.cutoffTime,
-        detail: `Grace window ends at ${new Date(v.cutoffTime).toISOString()}; requests using v${v.versionNumber} at/after cutoff are rejected.`,
+        detail: `Grace window ends at ${formatUtcIso(v.cutoffTime)}; requests using v${v.versionNumber} at/after cutoff are rejected.`,
       });
     }
   });
@@ -182,17 +183,17 @@ export default function KeyManagement({ session }) {
             {
               key: 'createdAt',
               header: 'Created',
-              render: (k) => <span className="mono">{new Date(k.createdAt).toISOString()}</span>,
+              render: (k) => <span className="mono">{formatUtcIso(k.createdAt)}</span>,
             },
             {
               key: 'activationTime',
               header: 'Activation Time',
-              render: (k) => (k.activationTime ? <span className="mono">{new Date(k.activationTime).toISOString()}</span> : '—'),
+              render: (k) => (k.activationTime ? <span className="mono">{formatUtcIso(k.activationTime)}</span> : '—'),
             },
             {
               key: 'cutoffTime',
               header: 'Cutoff / Grace End',
-              render: (k) => (k.cutoffTime ? <span className="mono">{new Date(k.cutoffTime).toISOString()}</span> : 'Active'),
+              render: (k) => (k.cutoffTime ? <span className="mono">{formatUtcIso(k.cutoffTime)}</span> : 'Active'),
             },
             {
               key: 'acks',

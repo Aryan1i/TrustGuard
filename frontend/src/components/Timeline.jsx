@@ -1,5 +1,6 @@
 import React from 'react';
 import StatusBadge from './StatusBadge';
+import { formatUtcIso } from '../dateUtils';
 
 export default function Timeline({ items }) {
   if (!items || items.length === 0) {
@@ -17,7 +18,7 @@ export default function Timeline({ items }) {
                 {item.status && <StatusBadge status={item.status} />}
               </div>
               <span className="mono" style={{ color: 'var(--text-muted)' }}>
-                {item.timestamp ? new Date(item.timestamp).toISOString() : ''}
+                {item.timestamp ? formatUtcIso(item.timestamp) : ''}
               </span>
             </div>
             {item.detail && (

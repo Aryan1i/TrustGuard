@@ -4,6 +4,7 @@ import DataTable from '../components/DataTable';
 import StatusBadge from '../components/StatusBadge';
 import ConfirmModal from '../components/ConfirmModal';
 import LoadingState from '../components/LoadingState';
+import { formatUtcIso } from '../dateUtils';
 
 export default function Recovery({ session }) {
   const [backups, setBackups] = useState([]);
@@ -134,7 +135,7 @@ export default function Recovery({ session }) {
             {
               key: 'createdAt',
               header: 'Created',
-              render: (b) => <span className="mono">{new Date(b.createdAt).toISOString()}</span>,
+              render: (b) => <span className="mono">{formatUtcIso(b.createdAt)}</span>,
             },
             { key: 'verificationStatus', header: 'Verification', render: (b) => <StatusBadge status={b.verificationStatus} /> },
             { key: 'restoreStatus', header: 'Restore Status', render: (b) => <StatusBadge status={b.restoreStatus} /> },

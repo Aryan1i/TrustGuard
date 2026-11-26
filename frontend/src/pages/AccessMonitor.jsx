@@ -3,6 +3,7 @@ import { api } from '../api';
 import DataTable from '../components/DataTable';
 import StatusBadge from '../components/StatusBadge';
 import LoadingState from '../components/LoadingState';
+import { formatUtcIso } from '../dateUtils';
 
 export default function AccessMonitor({ session }) {
   const [events, setEvents] = useState([]);
@@ -313,7 +314,7 @@ export default function AccessMonitor({ session }) {
             {
               key: 'timestampUtc',
               header: 'Timestamp',
-              render: (e) => <span className="mono">{new Date(e.timestampUtc).toISOString()}</span>,
+              render: (e) => <span className="mono">{formatUtcIso(e.timestampUtc)}</span>,
             },
           ]}
         />
