@@ -41,6 +41,11 @@ body {
 /* Left Clean White Sidebar */
 .sidebar {
   width: 284px;
+  height: 100vh;
+  position: sticky;
+  top: 0;
+  align-self: flex-start;
+  overflow: hidden;
   background: var(--bg-sidebar);
   border-right: 1px solid var(--border-color);
   display: flex;
@@ -54,6 +59,7 @@ body {
   align-items: center;
   justify-content: space-between;
   padding: 4px 6px 16px;
+  flex-shrink: 0;
 }
 
 .sidebar-brand {
@@ -82,6 +88,8 @@ body {
   flex-direction: column;
   gap: 2px;
   flex: 1;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .sidebar-link {
@@ -115,6 +123,7 @@ body {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  flex-shrink: 0;
 }
 
 .sidebar-user-row {
@@ -289,6 +298,9 @@ body {
   }
   .sidebar {
     width: 100%;
+    height: auto;
+    position: static;
+    overflow: visible;
   }
   .grid-4,
   .grid-3,
