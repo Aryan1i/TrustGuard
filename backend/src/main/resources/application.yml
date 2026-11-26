@@ -1,0 +1,32 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: trustguard
+  datasource:
+    url: ${DB_URL:jdbc:mysql://localhost:3306/trustguard?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC&createDatabaseIfNotExist=true}
+    username: ${DB_USERNAME:root}
+    password: ${DB_PASSWORD:}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: update
+    properties:
+      hibernate:
+        format_sql: true
+        jdbc:
+          time_zone: UTC
+
+trustguard:
+  keystore:
+    path: ${TRUSTGUARD_KEYSTORE_PATH:./data/trustguard-keystore.json}
+  jwt:
+    secret: ${TRUSTGUARD_JWT_SECRET:}
+    expiration-seconds: 28800
+  cors:
+    allowed-origins: ${TRUSTGUARD_CORS_ORIGINS:http://localhost:5173,http://127.0.0.1:5173,https://*.vercel.app}
+  demo:
+    seed-enabled: true
+    default-grace-seconds: 60

@@ -1,0 +1,19 @@
+{
+  "asset": "protected-resource",
+  "boundary": "identity-check",
+  "project": "TrustGuard",
+  "track": "Yugaantar DevForge Track 4 - Trust, but verify",
+  "primitives": {
+    "kem": "ML-KEM-768 (NIST FIPS 203 via pqcrypto==0.4.0 / BouncyCastle)",
+    "signature": "ML-DSA-65 (NIST FIPS 204 via BouncyCastle / pqcrypto)",
+    "mac": "HMAC-SHA-256",
+    "aead": "AES-256-GCM",
+    "kdf": "HKDF-SHA-256",
+    "audit_integrity": "SHA-256 canonical hash chain"
+  },
+  "assumptions": [
+    "Adapter relies on operating-system isolation of TRACK4_STATE_DIR and caller authentication when invoked by the judging worker or local orchestrator.",
+    "Full multi-user authentication, RBAC, distributed key rotation, and MySQL-backed persistence are enforced in the Spring Boot backend.",
+    "In-database audit hash chain detects non-privileged row edits but cannot stop an adversary with full database write + checkpoint access."
+  ]
+}
