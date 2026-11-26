@@ -1,9 +1,9 @@
 import React, { useEffect, useState } from 'react';
 import { api } from '../api';
+import StatCard from '../components/StatCard';
 import AlertCard from '../components/AlertCard';
 import DataTable from '../components/DataTable';
-import StatusBadge from '../components/StatusBadge';
-import MetricCard from '../components/MetricCard';
+import StatusBadge, { DotStatus } from '../components/StatusBadge';
 import LoadingState from '../components/LoadingState';
 import { formatUtcIso } from '../dateUtils';
 
@@ -41,69 +41,41 @@ export default function ThreatDetection() {
 
   return (
     <div>
-      {error && <div className="banner banner-danger">{error}</div>}
-
-      <div className="card section-gap">
-        <div className="card-header">
-          <div>
-            <h2 className="card-title">Security Event Analysis</h2>
-            <p className="card-subtitle">
-              Evaluates role changes, service access edges, clock offsets, and delivery ordering across recorded events.
-            </p>
-          </div>
-          <button type="button" className="btn btn-primary" disabled={running} onClick={runAndLoad}>
-            {running ? 'Evaluating...' : 'Re-run Evaluation'}
-          </button>
-        </div>
-
-        {metrics && (
-          <div className="grid grid-4">
-            <MetricCard
-              title="Classified Matches"
-              value={`${metrics.exactLabelMatches} / ${metrics.sampleSize}`}
-              source="Security Rules"
-              sampleSize={metrics.sampleSize}
-            />
-            <MetricCard
-              title="Confusion Matrix (TP / FP / TN / FN)"
-              value={`${metrics.truePositives} / ${metrics.falsePositives} / ${metrics.trueNegatives} / ${metrics.falseNegatives}`}
-              source="Alert Evaluation"
-              sampleSize={metrics.sampleSize}
-            />
-            <MetricCard
-              title="Precision / Recall / F1"
-              value={`${metrics.precision} / ${metrics.recall} / ${metrics.f1Score}`}
-              source="Alert Evaluation"
-              sampleSize={metrics.sampleSize}
-            />
-            <MetricCard
-              title="False Alerts / 1,000 Benign"
-              value={metrics.falseAlertsPer1000Benign}
-              source="Alert Evaluation"
-              sampleSize={metrics.sampleSize}
-            />
-          </div>
-        )}
+      <div className="page-subheader">
+        <h2 className="page-subheader-title">Threat Detection & Alerts</h2>
+        <button type="button" className="btn btn-primary" disabled={running} onClick={runAndLoad}>
+          {running ? 'Evaluating...' : 'Re-run Evaluation'}
+        </button>
       </div>
 
+      {error && <div className="banner banner-danger">{error}</div>}
+
+      {metrics && (
+        <div className="grid grid-4 section-gap">
+          <StatCard label="Events Evaluated" value={metrics.sampleSize} delta={`${metrics.exactLabelMatches} matched`} deltaTone="up" meta="Rule-based classifier" />
+          <StatCard label="True Positives / FP" value={`${metrics.truePositives} / ${metrics.falsePositives}`} delta={`TN: ${metrics.trueNegatives}`} deltaTone="up" meta={`False negatives: ${metrics.falseNegatives}`} />
+          <StatCard label="Precision / Recall" value={`${metrics.precision} / ${metrics.recall}`} delta={`F1 ${metrics.f1Score}`} deltaTone="up" meta="Alert quality" />
+          <StatCard label="False Alerts / 1k" value={metrics.falseAlertsPer1000Benign} delta={`${alerts.length} alerts`} deltaTone="neutral" meta="Benign baseline rate" />
+        </div>
+      )}
+
       <div className="card section-gap">
-        <div className="card-header">
-          <div>
-            <h2 className="card-title">Security Alerts ({filteredAlerts.length})</h2>
-            <p className="card-subtitle">Distinguishes denied probe attempts from confirmed policy violations and timing advisories.</p>
-          </div>
-          <div className="flex-row">
+        <div className="table-toolbar">
+          <div className="mint-tabs" role="tablist">
             {['ALL', 'CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'INFO'].map((sev) => (
               <button
                 key={sev}
                 type="button"
-                className={`btn btn-sm ${severityFilter === sev ? 'btn-primary' : 'btn-secondary'}`}
+                className={`mint-tab${severityFilter === sev ? ' active' : ''}`}
                 onClick={() => setSeverityFilter(sev)}
               >
                 {sev}
               </button>
             ))}
           </div>
+          <span style={{ fontSize: '12.5px', color: 'var(--text-muted)' }}>
+            Showing {filteredAlerts.length} alert(s)
+          </span>
         </div>
 
         {filteredAlerts.map((alert) => (
@@ -119,24 +91,24 @@ export default function ThreatDetection() {
           </div>
         </div>
         <DataTable
+          searchable
+          searchPlaceholder="Search events..."
           rowKey={(r) => r.eventId}
           rows={evaluation?.classifiedEvents || []}
           columns={[
             { key: 'eventId', header: 'Event ID', render: (r) => <span className="mono">{r.eventId}</span> },
-            { key: 'actor', header: 'Actor', render: (r) => <span className="mono">{r.actor}</span> },
+            { key: 'actor', header: 'Actor', render: (r) => <strong>{r.actor}</strong> },
             { key: 'edge', header: 'Service Edge', render: (r) => <span className="mono">{r.sourceService} → {r.targetService} ({r.action})</span> },
-            { key: 'outcome', header: 'Outcome', render: (r) => <StatusBadge status={r.outcome === 'deny' ? 'DENY' : 'ALLOW'} /> },
-            { key: 'rawEventTimeUtc', header: 'Raw Event Time', render: (r) => <span className="mono">{formatUtcIso(r.rawEventTimeUtc)}</span> },
-            { key: 'sourceClockOffsetMs', header: 'Clock Offset', render: (r) => `${r.sourceClockOffsetMs} ms` },
+            { key: 'outcome', header: 'Outcome', render: (r) => <DotStatus label={r.outcome} tone={r.outcome === 'deny' ? 'red' : 'green'} /> },
+            { key: 'rawEventTimeUtc', header: 'Raw Time', render: (r) => <span className="mono">{formatUtcIso(r.rawEventTimeUtc)}</span> },
+            { key: 'sourceClockOffsetMs', header: 'Offset', render: (r) => `${r.sourceClockOffsetMs} ms` },
             { key: 'correctedEventTimeUtc', header: 'Corrected Time', render: (r) => <span className="mono">{formatUtcIso(r.correctedEventTimeUtc)}</span> },
-            { key: 'deliveryDelayMs', header: 'Collector Delay', render: (r) => `${r.deliveryDelayMs} ms` },
             {
               key: 'outOfOrderArrival',
-              header: 'Delivery Order',
-              render: (r) =>
-                r.outOfOrderArrival ? <StatusBadge status="OUT_OF_ORDER" variant="warning" /> : <StatusBadge status="IN_ORDER" variant="neutral" />,
+              header: 'Delivery',
+              render: (r) => <StatusBadge status={r.outOfOrderArrival ? 'OUT_OF_ORDER' : 'IN_ORDER'} />,
             },
-            { key: 'predictedLabel', header: 'Classification', render: (r) => <StatusBadge status={r.predictedLabel} variant="info" /> },
+            { key: 'predictedLabel', header: 'Classification', render: (r) => <StatusBadge status={r.predictedLabel} /> },
             { key: 'explanation', header: 'Explanation' },
           ]}
         />

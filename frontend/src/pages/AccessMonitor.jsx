@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { api } from '../api';
+import StatCard from '../components/StatCard';
 import DataTable from '../components/DataTable';
-import StatusBadge from '../components/StatusBadge';
+import StatusBadge, { DotStatus } from '../components/StatusBadge';
 import LoadingState from '../components/LoadingState';
 import { formatUtcIso } from '../dateUtils';
 
@@ -10,6 +11,7 @@ export default function AccessMonitor({ session }) {
   const [resources, setResources] = useState([]);
   const [devices, setDevices] = useState([]);
   const [nodes, setNodes] = useState([]);
+  const [decisionTab, setDecisionTab] = useState('ALL');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [lastResult, setLastResult] = useState(null);
@@ -78,15 +80,37 @@ export default function AccessMonitor({ session }) {
 
   const isAdmin = session?.role === 'ADMIN';
   const revokedDev = devices.find((d) => d.status === 'REVOKED');
+  const allowCount = events.filter((e) => e.decision === 'ALLOW').length;
+  const denyCount = events.filter((e) => e.decision === 'DENY').length;
+  const filteredEvents = events.filter((e) => decisionTab === 'ALL' || e.decision === decisionTab);
 
   return (
     <div>
+      <div className="page-subheader">
+        <h2 className="page-subheader-title">Access Policy Monitor</h2>
+        <div className="flex-row">
+          <button type="button" className="btn btn-primary" disabled={submitting} onClick={() => runSimulation()}>
+            {submitting ? 'Evaluating...' : 'Evaluate Access'}
+          </button>
+          <button type="button" className="btn btn-secondary" onClick={load}>
+            Refresh
+          </button>
+        </div>
+      </div>
+
       {error && <div className="banner banner-danger">{error}</div>}
+
+      <div className="grid grid-4 section-gap">
+        <StatCard label="Access Checks" value={events.length} delta="Recorded" deltaTone="neutral" meta="Total policy evaluations" />
+        <StatCard label="Allowed" value={allowCount} delta={events.length ? `${Math.round((allowCount / events.length) * 100)}%` : '0%'} deltaTone="up" meta="Verified owner & device" />
+        <StatCard label="Denied" value={denyCount} delta="Zero disclosure" deltaTone={denyCount > 0 ? 'down' : 'neutral'} meta="Blocked unauthorized requests" />
+        <StatCard label="Protected Assets" value={resources.length} delta={`${nodes.length} nodes`} deltaTone="up" meta="Policy-guarded resources" />
+      </div>
 
       <div className="card section-gap">
         <div className="card-header">
           <div>
-            <h2 className="card-title">Zero-Trust Access Policy Simulator</h2>
+            <h2 className="card-title">Policy Simulator</h2>
             <p className="card-subtitle">
               Evaluate device trust, resource ownership, key validity, and service-level authorization policies.
             </p>
@@ -248,10 +272,6 @@ export default function AccessMonitor({ session }) {
               />
             </div>
           </div>
-
-          <button type="submit" className="btn btn-primary" disabled={submitting}>
-            {submitting ? 'Evaluating Policy...' : 'Evaluate Access Request'}
-          </button>
         </form>
 
         {lastResult && (
@@ -262,11 +282,6 @@ export default function AccessMonitor({ session }) {
             <div className="flex-row" style={{ justifyContent: 'space-between' }}>
               <div>
                 <strong>Decision: {lastResult.decision}</strong> · {lastResult.reason}
-                {lastResult.demoSimulation && (
-                  <span style={{ marginLeft: '8px' }}>
-                    <StatusBadge status="SIMULATED" variant="warning" />
-                  </span>
-                )}
               </div>
               <span className="mono">{lastResult.requestId}</span>
             </div>
@@ -280,42 +295,33 @@ export default function AccessMonitor({ session }) {
       </div>
 
       <div className="card">
-        <div className="card-header">
-          <h2 className="card-title">Access Decision Log ({events.length})</h2>
-          <button type="button" className="btn btn-secondary btn-sm" onClick={load}>
-            Refresh
-          </button>
-        </div>
         <DataTable
+          searchable
+          searchPlaceholder="Search access events..."
+          activeTab={decisionTab}
+          onTabChange={setDecisionTab}
+          tabs={[
+            { id: 'ALL', label: `All decisions (${events.length})` },
+            { id: 'ALLOW', label: `Allowed (${allowCount})` },
+            { id: 'DENY', label: `Denied (${denyCount})` },
+          ]}
           rowKey={(e) => e.requestId}
-          rows={events}
+          rows={filteredEvents}
           columns={[
             { key: 'requestId', header: 'Request ID', render: (e) => <span className="mono">{e.requestId}</span> },
-            {
-              key: 'actor',
-              header: 'Actor',
-              render: (e) => (
-                <div>
-                  <strong>{e.actor}</strong>
-                  {e.demoSimulation && (
-                    <div style={{ fontSize: '11px', color: 'var(--warning-text)' }}>
-                      simulated by {e.authenticatedPrincipal}
-                    </div>
-                  )}
-                </div>
-              ),
-            },
+            { key: 'actor', header: 'Actor', render: (e) => <strong>{e.actor}</strong> },
             { key: 'deviceUid', header: 'Device', render: (e) => <span className="mono">{e.deviceUid}</span> },
             { key: 'path', header: 'Service Edge', render: (e) => <span className="mono">{e.sourceService} → {e.targetService}</span> },
             { key: 'resource', header: 'Resource', render: (e) => <span className="mono">{e.resource}</span> },
             { key: 'nodeCode', header: 'Node', render: (e) => <span className="mono">{e.nodeCode}</span> },
-            { key: 'decision', header: 'Decision', render: (e) => <StatusBadge status={e.decision} /> },
-            { key: 'reason', header: 'Policy Reason' },
             {
-              key: 'timestampUtc',
-              header: 'Timestamp',
-              render: (e) => <span className="mono">{formatUtcIso(e.timestampUtc)}</span>,
+              key: 'trust',
+              header: 'Policy',
+              render: (e) => <DotStatus label={e.decision === 'ALLOW' ? 'Permitted' : 'Blocked'} tone={e.decision === 'ALLOW' ? 'green' : 'red'} />,
             },
+            { key: 'decision', header: 'Decision', render: (e) => <StatusBadge status={e.decision} /> },
+            { key: 'reason', header: 'Reason' },
+            { key: 'timestampUtc', header: 'Timestamp', render: (e) => <span className="mono">{formatUtcIso(e.timestampUtc)}</span> },
           ]}
         />
       </div>

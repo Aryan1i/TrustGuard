@@ -1,13 +1,15 @@
 import React, { useEffect, useState } from 'react';
 import { api } from '../api';
+import StatCard from '../components/StatCard';
 import DataTable from '../components/DataTable';
-import StatusBadge from '../components/StatusBadge';
+import StatusBadge, { DotStatus } from '../components/StatusBadge';
 import ConfirmModal from '../components/ConfirmModal';
 import LoadingState from '../components/LoadingState';
 import { formatUtcIso } from '../dateUtils';
 
 export default function Recovery({ session }) {
   const [backups, setBackups] = useState([]);
+  const [activeTab, setActiveTab] = useState('ALL');
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -98,46 +100,117 @@ export default function Recovery({ session }) {
   if (loading && backups.length === 0) return <LoadingState />;
 
   const isAdmin = session?.role === 'ADMIN';
+  const verifiedCount = backups.filter((b) => b.verificationStatus === 'VERIFIED').length;
+  const corruptedCount = backups.filter((b) => b.verificationStatus === 'CORRUPTED').length;
+  const restoredCount = backups.filter((b) => b.restoreStatus === 'RESTORED').length;
+
+  const filtered = backups.filter((b) => {
+    if (activeTab === 'VERIFIED') return b.verificationStatus === 'VERIFIED';
+    if (activeTab === 'CORRUPTED') return b.verificationStatus === 'CORRUPTED';
+    return true;
+  });
 
   return (
     <div>
+      <div className="page-subheader">
+        <h2 className="page-subheader-title">Backup &amp; Recovery</h2>
+        <div className="flex-row">
+          <button type="button" className="btn btn-primary" disabled={!isAdmin || busy} onClick={handleCreate}>
+            + Create Verified Backup
+          </button>
+          <button type="button" className="btn btn-secondary" onClick={load}>
+            Refresh
+          </button>
+        </div>
+      </div>
+
       {!isAdmin && (
         <div className="banner banner-warning">
-          Signed in as {session?.username}. Creating, corrupting-testing, and restoring backups require ADMIN privileges.
+          Signed in as {session?.username}. Creating, testing corruption on, and restoring backups require ADMIN privileges.
         </div>
       )}
       {error && <div className="banner banner-danger">{error}</div>}
       {notice && <div className="banner banner-info">{notice}</div>}
 
+      <div className="grid grid-4 section-gap">
+        <StatCard
+          label="Total Backups"
+          value={backups.length}
+          delta="Encrypted snapshots"
+          deltaTone="neutral"
+          meta="Stored recovery points"
+        />
+        <StatCard
+          label="Verified"
+          value={verifiedCount}
+          delta="SHA-256 intact"
+          deltaTone="up"
+          meta="Passed integrity check"
+        />
+        <StatCard
+          label="Corrupted"
+          value={corruptedCount}
+          delta={corruptedCount > 0 ? 'Restore blocked' : '0 tampered'}
+          deltaTone={corruptedCount > 0 ? 'down' : 'up'}
+          meta="Checksum mismatch"
+        />
+        <StatCard
+          label="Restored"
+          value={restoredCount}
+          delta="Monotonic guard"
+          deltaTone="up"
+          meta="Revocations preserved"
+        />
+      </div>
+
       <div className="card">
         <div className="card-header">
           <div>
-            <h2 className="card-title">Cryptographic Backup & Crash Recovery</h2>
+            <h2 className="card-title">Verified Snapshot Archive</h2>
             <p className="card-subtitle">
-              SHA-256 checksums are verified prior to restore; corrupted snapshots are rejected, and committed key version & device revocations remain monotonically enforced.
+              SHA-256 checksums are verified before every restore; corrupted snapshots are rejected while committed key versions and revocations remain preserved.
             </p>
           </div>
-          <button type="button" className="btn btn-primary" disabled={!isAdmin || busy} onClick={handleCreate}>
-            Create Verified Backup
-          </button>
         </div>
 
         <DataTable
+          searchable
+          searchPlaceholder="Search backup ID or checksum..."
+          activeTab={activeTab}
+          onTabChange={setActiveTab}
+          tabs={[
+            { id: 'ALL', label: `All backups (${backups.length})` },
+            { id: 'VERIFIED', label: `Verified (${verifiedCount})` },
+            { id: 'CORRUPTED', label: `Corrupted (${corruptedCount})` },
+          ]}
           rowKey={(b) => b.backupId}
-          rows={backups}
+          rows={filtered}
           emptyTitle="No backups created yet"
-          emptyMessage="Click 'Create Verified Backup' to snapshot devices, revocations, and resource ciphertexts."
+          emptyMessage="Click '+ Create Verified Backup' to snapshot devices, revocations, and protected assets."
           columns={[
             { key: 'backupId', header: 'Backup ID', render: (b) => <span className="mono">{b.backupId}</span> },
             { key: 'keyVersionNumber', header: 'Key Ver', render: (b) => `v${b.keyVersionNumber}` },
             { key: 'revocationVersion', header: 'Revocation Ver', render: (b) => `v${b.revocationVersion}` },
-            { key: 'checksumSha256', header: 'SHA-256 Checksum', render: (b) => <span className="mono">{b.checksumSha256?.slice(0, 16)}…</span> },
+            {
+              key: 'checksumSha256',
+              header: 'SHA-256 Checksum',
+              render: (b) => <span className="mono">{b.checksumSha256?.slice(0, 16)}…</span>,
+            },
             {
               key: 'createdAt',
-              header: 'Created',
+              header: 'Created (UTC)',
               render: (b) => <span className="mono">{formatUtcIso(b.createdAt)}</span>,
             },
-            { key: 'verificationStatus', header: 'Verification', render: (b) => <StatusBadge status={b.verificationStatus} /> },
+            {
+              key: 'verificationStatus',
+              header: 'Integrity',
+              render: (b) => (
+                <DotStatus
+                  label={b.verificationStatus}
+                  tone={b.verificationStatus === 'VERIFIED' ? 'green' : b.verificationStatus === 'CORRUPTED' ? 'red' : 'amber'}
+                />
+              ),
+            },
             { key: 'restoreStatus', header: 'Restore Status', render: (b) => <StatusBadge status={b.restoreStatus} /> },
             {
               key: 'actions',
