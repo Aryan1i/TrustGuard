@@ -1,4 +1,5 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
+import { useLocation } from 'react-router-dom';
 import EmptyState from './EmptyState';
 
 export default function DataTable({
@@ -14,8 +15,16 @@ export default function DataTable({
   searchPlaceholder = 'Search records...',
   pageSize = 10,
 }) {
-  const [query, setQuery] = useState('');
+  const location = useLocation();
+  const urlQuery = useMemo(() => new URLSearchParams(location.search).get('q') || '', [location.search]);
+  const [query, setQuery] = useState(() => (searchable ? urlQuery : ''));
   const [page, setPage] = useState(1);
+
+  useEffect(() => {
+    if (!searchable) return;
+    setQuery(urlQuery);
+    setPage(1);
+  }, [searchable, urlQuery]);
 
   const filtered = useMemo(() => {
     if (!rows) return [];
