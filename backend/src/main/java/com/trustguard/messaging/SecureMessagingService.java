@@ -11,7 +11,6 @@ import com.trustguard.dto.SendMessageRequest;
 import com.trustguard.entity.ConsumedMessageEntity;
 import com.trustguard.entity.DeviceEntity;
 import com.trustguard.entity.SecureMessageEntity;
-import com.trustguard.entity.SecurityAlertEntity;
 import com.trustguard.exception.AccessDeniedBusinessException;
 import com.trustguard.exception.ConflictException;
 import com.trustguard.exception.IntegrityViolationException;
@@ -19,8 +18,8 @@ import com.trustguard.exception.ResourceNotFoundException;
 import com.trustguard.repository.ConsumedMessageRepository;
 import com.trustguard.repository.DeviceRepository;
 import com.trustguard.repository.SecureMessageRepository;
-import com.trustguard.repository.SecurityAlertRepository;
 import com.trustguard.security.SecurityUtils;
+import com.trustguard.service.SecurityPersistenceService;
 import com.trustguard.util.CanonicalJsonUtil;
 import com.trustguard.util.HashUtil;
 import org.springframework.stereotype.Service;
@@ -40,34 +39,41 @@ public class SecureMessagingService {
     private final SecureMessageRepository messageRepository;
     private final ConsumedMessageRepository consumedRepository;
     private final DeviceRepository deviceRepository;
-    private final SecurityAlertRepository alertRepository;
     private final PostQuantumCryptoService cryptoService;
     private final ProtectedKeyStore keyStore;
     private final AuditLogService auditLogService;
+    private final SecurityPersistenceService persistenceService;
     private final ObjectMapper objectMapper;
 
     public SecureMessagingService(
             SecureMessageRepository messageRepository,
             ConsumedMessageRepository consumedRepository,
             DeviceRepository deviceRepository,
-            SecurityAlertRepository alertRepository,
             PostQuantumCryptoService cryptoService,
             ProtectedKeyStore keyStore,
             AuditLogService auditLogService,
+            SecurityPersistenceService persistenceService,
             ObjectMapper objectMapper
     ) {
         this.messageRepository = messageRepository;
         this.consumedRepository = consumedRepository;
         this.deviceRepository = deviceRepository;
-        this.alertRepository = alertRepository;
         this.cryptoService = cryptoService;
         this.keyStore = keyStore;
         this.auditLogService = auditLogService;
+        this.persistenceService = persistenceService;
         this.objectMapper = objectMapper;
     }
 
     public List<SecureMessageResponse> listMessages() {
-        return messageRepository.findAllByOrderByCreatedAtDesc().stream()
+        List<SecureMessageEntity> list;
+        if (SecurityUtils.isAdmin()) {
+            list = messageRepository.findAllByOrderByCreatedAtDesc();
+        } else {
+            String caller = SecurityUtils.currentUsername();
+            list = messageRepository.findBySenderUsernameOrRecipientUsernameOrderByCreatedAtDesc(caller, caller);
+        }
+        return list.stream()
                 .map(m -> toDto(m, null))
                 .toList();
     }
@@ -75,13 +81,14 @@ public class SecureMessagingService {
     @Transactional
     public SecureMessageResponse sendMessage(SendMessageRequest req) {
         String senderUsername = SecurityUtils.currentUsername();
-        DeviceEntity senderDevice = resolveActiveDevice(req.senderDeviceId(), senderUsername);
-        DeviceEntity recipientDevice = resolveActiveDevice(req.recipientDeviceId(), req.recipientUsername().trim());
+        String targetRecipientUsername = req.recipientUsername().trim();
+        DeviceEntity senderDevice = resolveActiveDevice(req.senderDeviceId(), senderUsername, "sender");
+        DeviceEntity recipientDevice = resolveActiveDevice(req.recipientDeviceId(), targetRecipientUsername, "recipient");
 
-        if ("REVOKED".equals(senderDevice.getStatus()) || "REVOKED".equals(recipientDevice.getStatus())) {
+        if (!"ACTIVE".equals(senderDevice.getStatus()) || !"ACTIVE".equals(recipientDevice.getStatus())) {
             throw new AccessDeniedBusinessException(
                     "DEVICE_REVOKED",
-                    "Cannot establish secure messaging channel with a revoked device"
+                    "Cannot establish secure messaging channel with a revoked or inactive device"
             );
         }
 
@@ -90,7 +97,22 @@ public class SecureMessagingService {
                 : "msg-" + UUID.randomUUID().toString().substring(0, 12);
 
         if (messageRepository.findByMessageId(messageId).isPresent() || consumedRepository.existsByMessageId(messageId)) {
-            recordReplayAlert(senderUsername, messageId, "Attempted duplicate messageId during send");
+            persistenceService.recordLiveAlertInNewTx(
+                    "alt-replay",
+                    "duplicate_replayed_message_id",
+                    "HIGH",
+                    "DENIED_ATTEMPT",
+                    senderUsername,
+                    "messaging -> send",
+                    messageId,
+                    "Attempted duplicate messageId during send"
+            );
+            auditLogService.appendEvent(
+                    senderUsername,
+                    "SECURE_MESSAGE_REJECTED",
+                    messageId,
+                    "Attempted duplicate messageId during send: " + messageId
+            );
             throw new ConflictException("DUPLICATE_MESSAGE_ID", "Message ID already exists: " + messageId);
         }
 
@@ -99,8 +121,6 @@ public class SecureMessagingService {
         // ephemeral private key is erased immediately upon receipt/decapsulation (one-time prekey).
         String ephemeralKeyId = "eph-" + messageId;
         PostQuantumCryptoService.RawKeyPair ephemeralKem = cryptoService.generateMlKem768KeyPair();
-        keyStore.storeSecret(ephemeralKeyId + "-priv", ephemeralKem.privateKey());
-
         String boundRecipient = req.simulateTamperedRecipient()
                 ? "tampered-wrong-recipient"
                 : recipientDevice.getOwner().getUsername();
@@ -155,7 +175,9 @@ public class SecureMessagingService {
             entity.setStatus("SENT");
             entity.setVerificationOutcome("PENDING_DELIVERY");
             entity.setCreatedAt(createdAt);
-            messageRepository.save(entity);
+            messageRepository.saveAndFlush(entity);
+
+            keyStore.storeSecret(ephemeralKeyId + "-priv", ephemeralKem.privateKey());
 
             auditLogService.appendEvent(
                     senderUsername,
@@ -170,44 +192,101 @@ public class SecureMessagingService {
         }
     }
 
-    @Transactional
     public SecureMessageResponse receiveMessage(String messageId, ReceiveMessageRequest req) {
         String caller = SecurityUtils.currentUsername();
+        boolean isAdmin = SecurityUtils.isAdmin();
+
         SecureMessageEntity msg = messageRepository.findByMessageId(messageId)
                 .orElseThrow(() -> new ResourceNotFoundException("Secure message not found: " + messageId));
-
-        if (consumedRepository.existsByMessageId(messageId)) {
-            recordReplayAlert(caller, messageId, "Duplicate/replayed message receive blocked for messageId=" + messageId);
-            throw new ConflictException("REPLAY_DETECTED", "Duplicate messageId rejected: " + messageId);
-        }
-
-        if ("REVOKED".equals(msg.getRecipientDevice().getStatus())) {
-            msg.setStatus("REJECTED");
-            msg.setVerificationOutcome("RECIPIENT_DEVICE_REVOKED");
-            messageRepository.save(msg);
-            throw new AccessDeniedBusinessException("RECIPIENT_REVOKED", "Recipient device is revoked");
-        }
 
         String claimedRecipient = (req != null && req.claimedRecipientUsername() != null && !req.claimedRecipientUsername().isBlank())
                 ? req.claimedRecipientUsername().trim()
                 : caller;
 
-        if (!claimedRecipient.equals(caller) && !SecurityUtils.isAdmin()) {
+        // 1. Authorization checks FIRST: unauthorized callers MUST NOT mutate message state or erase keys
+        if (!claimedRecipient.equals(caller) && !isAdmin) {
+            auditLogService.appendEvent(
+                    caller,
+                    "SECURE_MESSAGE_UNAUTHORIZED",
+                    messageId,
+                    "Blocked recipient impersonation attempt: caller=" + caller + ", claimed=" + claimedRecipient
+            );
             throw new AccessDeniedBusinessException("RECIPIENT_IMPERSONATION", "Authenticated identity mismatch");
         }
 
+        if (!msg.getRecipientUsername().equals(caller) && !isAdmin) {
+            auditLogService.appendEvent(
+                    caller,
+                    "SECURE_MESSAGE_UNAUTHORIZED",
+                    messageId,
+                    "Blocked unauthorized receive attempt by caller=" + caller + " on message for " + msg.getRecipientUsername()
+            );
+            throw new AccessDeniedBusinessException(
+                    "RECIPIENT_MISMATCH",
+                    "Caller " + caller + " is not authorized to receive messages for " + msg.getRecipientUsername()
+            );
+        }
+
+        // 2. Replay protection (persisted alert + audit in REQUIRES_NEW)
+        if (consumedRepository.existsByMessageId(messageId)) {
+            persistenceService.recordLiveAlertInNewTx(
+                    "alt-replay",
+                    "duplicate_replayed_message_id",
+                    "HIGH",
+                    "DENIED_ATTEMPT",
+                    caller,
+                    "messaging -> receive",
+                    messageId,
+                    "Duplicate/replayed message receive blocked for messageId=" + messageId
+            );
+            auditLogService.appendEvent(
+                    caller,
+                    "SECURE_MESSAGE_REPLAY_BLOCKED",
+                    messageId,
+                    "Duplicate/replayed message receive blocked for messageId=" + messageId
+            );
+            throw new ConflictException("REPLAY_DETECTED", "Duplicate messageId rejected: " + messageId);
+        }
+
+        // 3. Admin-claimed recipient mismatch (does NOT mark valid message REJECTED)
+        if (!msg.getRecipientUsername().equals(claimedRecipient)) {
+            auditLogService.appendEvent(
+                    caller,
+                    "SECURE_MESSAGE_REJECTED",
+                    messageId,
+                    "Rejected receive due to claimed recipient mismatch: intended=" + msg.getRecipientUsername() + ", claimed=" + claimedRecipient
+            );
+            throw new AccessDeniedBusinessException(
+                    "RECIPIENT_MISMATCH",
+                    "Recipient binding failed: intended recipient is " + msg.getRecipientUsername() + ", claimed is " + claimedRecipient
+            );
+        }
+
+        // 4. Device revocation enforcement for recipient's device
+        if (!"ACTIVE".equals(msg.getRecipientDevice().getStatus())) {
+            markMessageRejected(messageId, "RECIPIENT_DEVICE_REVOKED");
+            auditLogService.appendEvent(
+                    caller,
+                    "SECURE_MESSAGE_REJECTED",
+                    messageId,
+                    "Rejected delivery: recipient device " + msg.getRecipientDevice().getDeviceUid() + " is revoked"
+            );
+            throw new AccessDeniedBusinessException("RECIPIENT_REVOKED", "Recipient device is revoked");
+        }
+
+        // 5. Verify AAD recipient binding inside envelope
         Map<String, Object> aadMap;
         try {
             aadMap = objectMapper.readValue(msg.getAadJson(), new TypeReference<>() {});
         } catch (Exception e) {
+            markMessageRejected(messageId, "INVALID_AAD");
+            auditLogService.appendEvent(caller, "SECURE_MESSAGE_REJECTED", messageId, "Malformed message AAD");
             throw new IntegrityViolationException("INVALID_AAD", "Malformed message AAD");
         }
 
         String aadRecipient = String.valueOf(aadMap.get("recipient"));
-        if (!aadRecipient.equals(claimedRecipient) || !msg.getRecipientUsername().equals(claimedRecipient)) {
-            msg.setStatus("REJECTED");
-            msg.setVerificationOutcome("RECIPIENT_MISMATCH_REJECTED");
-            messageRepository.save(msg);
+        if (!aadRecipient.equals(claimedRecipient)) {
+            markMessageRejected(messageId, "RECIPIENT_MISMATCH_REJECTED");
             auditLogService.appendEvent(
                     caller,
                     "SECURE_MESSAGE_REJECTED",
@@ -220,26 +299,25 @@ public class SecureMessagingService {
             );
         }
 
-        String effectiveCiphertextB64 = (req != null && req.overrideCiphertextB64() != null && !req.overrideCiphertextB64().isBlank())
+        boolean hasOverrideCt = req != null && req.overrideCiphertextB64() != null && !req.overrideCiphertextB64().isBlank();
+        String effectiveCiphertextB64 = hasOverrideCt
                 ? req.overrideCiphertextB64().trim()
                 : msg.getCiphertextB64();
 
-        // 1. Verify ML-DSA-65 signature before decryption
+        // 6. Verify ML-DSA-65 signature BEFORE touching ephemeral keyStore
         byte[] senderSigPub = Base64.getDecoder().decode(msg.getSenderDevice().getSigningPublicKeyB64());
         byte[] signatureBytes = Base64.getDecoder().decode(msg.getSignatureB64());
         String sigInput = msg.getMessageId() + "|" + msg.getKemCiphertextB64() + "|" + msg.getIvB64()
                 + "|" + effectiveCiphertextB64 + "|" + msg.getAadJson();
 
         if (!cryptoService.verifyMlDsa65(senderSigPub, sigInput.getBytes(StandardCharsets.UTF_8), signatureBytes)) {
-            msg.setStatus("REJECTED");
-            msg.setVerificationOutcome("ML_DSA_SIGNATURE_INVALID");
-            messageRepository.save(msg);
+            markMessageRejected(messageId, "ML_DSA_SIGNATURE_INVALID");
             auditLogService.appendEvent(caller, "SECURE_MESSAGE_REJECTED", messageId, "ML-DSA-65 signature verification failed");
             throw new IntegrityViolationException("SIGNATURE_INVALID", "ML-DSA-65 signature verification failed");
         }
 
-        // 2. Consume and immediately erase one-time ephemeral KEM private key for forward secrecy
-        byte[] ephPriv = keyStore.consumeAndErase(msg.getEphemeralKeyId() + "-priv");
+        // 7. Load (do NOT erase yet) ephemeral ML-KEM-768 private key, decapsulate & decrypt AES-256-GCM
+        byte[] ephPriv = keyStore.loadSecret(msg.getEphemeralKeyId() + "-priv");
         byte[] sharedSecret = null;
         byte[] aesKey = null;
         String plaintext;
@@ -251,28 +329,40 @@ public class SecureMessagingService {
             aesKey = cryptoService.hkdfSha256(sharedSecret, msg.getMessageId().getBytes(StandardCharsets.UTF_8), hkdfInfo, 32);
             plaintext = cryptoService.decryptAes256Gcm(aesKey, msg.getIvB64(), effectiveCiphertextB64, msg.getAadJson());
         } catch (IllegalArgumentException ex) {
-            msg.setStatus("REJECTED");
-            msg.setVerificationOutcome("AES_GCM_AUTH_FAILED");
-            messageRepository.save(msg);
+            if (!hasOverrideCt) {
+                markMessageRejected(messageId, "AES_GCM_AUTH_FAILED");
+            }
             auditLogService.appendEvent(caller, "SECURE_MESSAGE_REJECTED", messageId, "AES-256-GCM authentication tag failure");
             throw new IntegrityViolationException("CIPHERTEXT_INVALID", "AES-256-GCM authenticated decryption failed");
         } finally {
             cryptoService.zeroize(ephPriv, sharedSecret, aesKey);
         }
 
-        ConsumedMessageEntity consumed = new ConsumedMessageEntity();
-        consumed.setMessageId(messageId);
-        consumed.setRecipientUsername(claimedRecipient);
-        consumed.setSenderUsername(msg.getSenderUsername());
-        consumed.setAadHash(HashUtil.sha256Hex(msg.getAadJson()));
-        consumed.setConsumedAt(Instant.now());
-        consumedRepository.save(consumed);
+        // 8. Commit delivery + replay guard atomically FIRST, then erase ephemeral private key for forward secrecy
+        SecureMessageEntity delivered = persistenceService.inTransaction(() -> {
+            if (consumedRepository.existsByMessageId(messageId)) {
+                throw new ConflictException("REPLAY_DETECTED", "Duplicate messageId rejected: " + messageId);
+            }
+            SecureMessageEntity latestMsg = messageRepository.findByMessageId(messageId)
+                    .orElseThrow(() -> new ResourceNotFoundException("Secure message not found: " + messageId));
 
-        msg.setStatus("DELIVERED");
-        msg.setVerificationOutcome("VERIFIED_ML_DSA_AND_GCM");
-        msg.setForwardSecrecyErased(true);
-        msg.setDeliveredAt(Instant.now());
-        messageRepository.save(msg);
+            ConsumedMessageEntity consumed = new ConsumedMessageEntity();
+            consumed.setMessageId(messageId);
+            consumed.setRecipientUsername(claimedRecipient);
+            consumed.setSenderUsername(latestMsg.getSenderUsername());
+            consumed.setAadHash(HashUtil.sha256Hex(latestMsg.getAadJson()));
+            consumed.setConsumedAt(Instant.now());
+            consumedRepository.saveAndFlush(consumed);
+
+            latestMsg.setStatus("DELIVERED");
+            latestMsg.setVerificationOutcome("VERIFIED_ML_DSA_AND_GCM");
+            latestMsg.setForwardSecrecyErased(true);
+            latestMsg.setDeliveredAt(Instant.now());
+            return messageRepository.saveAndFlush(latestMsg);
+        });
+
+        byte[] erasedPriv = keyStore.consumeAndErase(msg.getEphemeralKeyId() + "-priv");
+        cryptoService.zeroize(erasedPriv);
 
         auditLogService.appendEvent(
                 caller,
@@ -280,36 +370,37 @@ public class SecureMessagingService {
                 messageId,
                 "Verified ML-DSA-65 + ML-KEM-768 + AES-256-GCM; recorded replay protection & erased ephemeral KEM key"
         );
-        return toDto(msg, plaintext);
+        return toDto(delivered, plaintext);
     }
 
-    private DeviceEntity resolveActiveDevice(Long deviceId, String username) {
+    private void markMessageRejected(String messageId, String outcome) {
+        persistenceService.runInRequiresNew(() ->
+                messageRepository.findByMessageId(messageId).ifPresent(m -> {
+                    m.setStatus("REJECTED");
+                    m.setVerificationOutcome(outcome);
+                    messageRepository.save(m);
+                })
+        );
+    }
+
+    private DeviceEntity resolveActiveDevice(Long deviceId, String expectedOwnerUsername, String roleLabel) {
         if (deviceId != null) {
-            return deviceRepository.findById(deviceId)
+            DeviceEntity device = deviceRepository.findById(deviceId)
                     .orElseThrow(() -> new ResourceNotFoundException("Device not found: " + deviceId));
+            if (device.getOwner() == null || !device.getOwner().getUsername().equals(expectedOwnerUsername)) {
+                throw new AccessDeniedBusinessException(
+                        "DEVICE_OWNER_MISMATCH",
+                        "Specified " + roleLabel + " device " + device.getDeviceUid()
+                                + " does not belong to " + expectedOwnerUsername
+                );
+            }
+            return device;
         }
-        return deviceRepository.findFirstByOwnerUsernameAndStatusOrderByEnrolledAtDesc(username, "ACTIVE")
+        return deviceRepository.findFirstByOwnerUsernameAndStatusOrderByEnrolledAtDesc(expectedOwnerUsername, "ACTIVE")
                 .orElseThrow(() -> new AccessDeniedBusinessException(
                         "NO_ACTIVE_DEVICE",
-                        "No active device found for user " + username
+                        "No active device found for user " + expectedOwnerUsername
                 ));
-    }
-
-    private void recordReplayAlert(String actor, String messageId, String explanation) {
-        SecurityAlertEntity alert = new SecurityAlertEntity();
-        alert.setAlertUid("alt-replay-" + UUID.randomUUID().toString().substring(0, 8));
-        alert.setRuleName("duplicate_replayed_message_id");
-        alert.setSeverity("HIGH");
-        alert.setOutcomeClassification("DENIED_ATTEMPT");
-        alert.setActor(actor);
-        alert.setServicePath("messaging -> receive");
-        alert.setEventIdsJson(CanonicalJsonUtil.toCanonicalJson(List.of(messageId)));
-        alert.setDetectedAt(Instant.now());
-        alert.setSourceEventTimeUtc(Instant.now());
-        alert.setDetectionLatencyMs(1L);
-        alert.setExplanation(explanation);
-        alert.setDatasetSource("LIVE_RUNTIME");
-        alertRepository.save(alert);
     }
 
     private SecureMessageResponse toDto(SecureMessageEntity m, String decryptedPlaintext) {

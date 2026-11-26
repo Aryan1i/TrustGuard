@@ -24,6 +24,7 @@ import json
 import os
 from pathlib import Path
 import secrets
+import stat
 import tempfile
 from typing import Any
 
@@ -45,7 +46,24 @@ def _state_dir() -> Path:
         base = Path(configured)
     else:
         base = Path(tempfile.gettempdir()) / DEFAULT_SUBDIR
-    base.mkdir(parents=True, exist_ok=True)
+
+    if base.exists() or os.path.islink(base):
+        st = os.lstat(base)
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+            raise AdapterError("Unsafe state directory")
+        if hasattr(os, "geteuid") and st.st_uid != os.geteuid():
+            raise AdapterError("State directory owned by unexpected user")
+    else:
+        base.mkdir(mode=0o700, parents=True, exist_ok=True)
+
+    os.chmod(base, 0o700)
+    final_stat = os.lstat(base)
+    if stat.S_ISLNK(final_stat.st_mode) or not stat.S_ISDIR(final_stat.st_mode):
+        raise AdapterError("Unsafe state directory")
+    if hasattr(os, "geteuid") and final_stat.st_uid != os.geteuid():
+        raise AdapterError("State directory owned by unexpected user")
+    if stat.S_IMODE(final_stat.st_mode) & 0o077:
+        raise AdapterError("Unsafe state directory permissions")
     return base
 
 
@@ -101,8 +119,12 @@ def _verify_audit_chain(chain: list[dict[str, Any]]) -> bool:
 @contextmanager
 def _locked_state_dir(state_dir: Path):
     lock_path = state_dir / LOCK_FILENAME
-    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+    flags = os.O_CREAT | os.O_RDWR
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(str(lock_path), flags, 0o600)
     try:
+        os.fchmod(fd, 0o600)
         fcntl.flock(fd, fcntl.LOCK_EX)
         yield
     finally:
@@ -130,6 +152,10 @@ def _atomic_write_bytes(target: Path, data: bytes, mode: int = 0o600) -> None:
 
 def _load_or_create_hmac_key(state_dir: Path, reset: bool = False) -> bytes:
     key_path = state_dir / HMAC_KEY_FILENAME
+    if key_path.exists() or os.path.islink(key_path):
+        st = os.lstat(key_path)
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+            raise AdapterError("Unsafe state integrity key file")
     if reset or not key_path.exists():
         raw_key = secrets.token_bytes(32)
         _atomic_write_bytes(key_path, raw_key, mode=0o600)
@@ -153,6 +179,8 @@ def _save_state(state_dir: Path, payload: dict[str, Any], hmac_key: bytes) -> No
 
 def _load_state(state_dir: Path) -> tuple[dict[str, Any], bytes]:
     state_path = state_dir / STATE_FILENAME
+    if os.path.islink(state_path):
+        raise AdapterError("Unsafe persisted state file")
     if not state_path.exists():
         raise AdapterError("Adapter state is not initialized")
     hmac_key = _load_or_create_hmac_key(state_dir, reset=False)
@@ -360,6 +388,21 @@ def _handle_protected_read(state_dir: Path, request: dict[str, Any]) -> dict[str
         request_id = _require_non_empty_str(request_id, "request_id")
 
     state, hmac_key = _load_state(state_dir)
+
+    if request_id in state["events"]:
+        # Reject replayed request_id without disclosing content or mutating original event record.
+        _append_audit_event(
+            state,
+            op="protected_read_replay",
+            request_id=f"{request_id}:replay:{secrets.token_hex(4)}",
+            actor=actor,
+            asset=asset,
+            decision="deny",
+            rule="duplicate_request_id",
+        )
+        _save_state(state_dir, state, hmac_key)
+        return {"decision": "deny"}
+
     allowed, rule = _evaluate_access(state, actor, asset)
 
     if not allowed:

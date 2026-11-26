@@ -104,6 +104,17 @@ public class ProtectedKeyStore {
         return Base64.getDecoder().decode(entries.get(keyId));
     }
 
+    public synchronized byte[] getOrCreateBackupHmacKey() {
+        String keyId = "backup-integrity-hmac-key";
+        if (!entries.containsKey(keyId)) {
+            byte[] randomKey = new byte[32];
+            secureRandom.nextBytes(randomKey);
+            entries.put(keyId, Base64.getEncoder().encodeToString(randomKey));
+            persist();
+        }
+        return Base64.getDecoder().decode(entries.get(keyId));
+    }
+
     public synchronized void clearForTest() {
         entries.clear();
         persist();

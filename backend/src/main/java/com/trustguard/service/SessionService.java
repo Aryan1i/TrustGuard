@@ -15,6 +15,7 @@ import com.trustguard.repository.DeviceRepository;
 import com.trustguard.repository.SessionRecordRepository;
 import com.trustguard.security.SecurityUtils;
 import com.trustguard.util.HashUtil;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -49,7 +50,10 @@ public class SessionService {
     }
 
     public List<SessionRecordEntity> listSessions() {
-        return sessionRepository.findAllByOrderByCreatedAtDesc();
+        if (SecurityUtils.isAdmin()) {
+            return sessionRepository.findAllByOrderByCreatedAtDesc();
+        }
+        return sessionRepository.findByActorUsernameOrderByCreatedAtDesc(SecurityUtils.currentUsername());
     }
 
     public List<Map<String, Object>> getLastTestResults() {
@@ -91,12 +95,16 @@ public class SessionService {
 
     @Transactional
     public SessionRecordEntity closeSession(String sessionId) {
+        String caller = SecurityUtils.currentUsername();
         SessionRecordEntity session = sessionRepository.findBySessionId(sessionId)
                 .orElseThrow(() -> new ResourceNotFoundException("Session not found: " + sessionId));
+        if (!session.getActorUsername().equals(caller) && !SecurityUtils.isAdmin()) {
+            throw new AccessDeniedBusinessException("SESSION_PEER_MISMATCH", "Cannot close another user's session");
+        }
         session.setStatus("CLOSED");
         session.setLastActiveAt(Instant.now());
         session = sessionRepository.save(session);
-        auditLogService.appendEvent(SecurityUtils.currentUsername(), "SESSION_CLOSED", sessionId, "Session closed gracefully");
+        auditLogService.appendEvent(caller, "SESSION_CLOSED", sessionId, "Session closed gracefully");
         return session;
     }
 
@@ -134,6 +142,7 @@ public class SessionService {
         return session;
     }
 
+    @PreAuthorize("hasRole('ADMIN')")
     public List<Map<String, Object>> runRepeatableSessionAndDeliverySuite() {
         String caller = SecurityUtils.currentUsername();
         List<Map<String, Object>> results = new ArrayList<>();

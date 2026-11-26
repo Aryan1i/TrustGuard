@@ -29,6 +29,9 @@ public class UserEntity {
     @Column(nullable = false)
     private boolean active = true;
 
+    @Column(name = "token_version", nullable = false, columnDefinition = "BIGINT NOT NULL DEFAULT 0")
+    private Long tokenVersion = 0L;
+
     @Column(name = "created_at", nullable = false)
     private Instant createdAt = Instant.now();
 
@@ -46,6 +49,8 @@ public class UserEntity {
     public void setRole(String role) { this.role = role; }
     public boolean isActive() { return active; }
     public void setActive(boolean active) { this.active = active; }
+    public long getTokenVersion() { return tokenVersion != null ? tokenVersion : 0L; }
+    public void setTokenVersion(long tokenVersion) { this.tokenVersion = tokenVersion; }
     public Instant getCreatedAt() { return createdAt; }
     public void setCreatedAt(Instant createdAt) { this.createdAt = createdAt; }
 }

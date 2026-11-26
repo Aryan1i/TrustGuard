@@ -58,24 +58,46 @@ public class DeviceService {
     }
 
     public List<Map<String, Object>> listUsers() {
+        if (SecurityUtils.isAdmin()) {
+            return userRepository.findAll().stream()
+                    .map(this::toUserSummary)
+                    .toList();
+        }
+        String caller = SecurityUtils.currentUsername();
+        UserEntity callerEntity = userRepository.findByUsername(caller)
+                .orElseThrow(() -> new ResourceNotFoundException("User not found: " + caller));
+        return List.of(toUserSummary(callerEntity));
+    }
+
+    public List<Map<String, Object>> listMessagingRecipients() {
         return userRepository.findAll().stream()
+                .filter(UserEntity::isActive)
                 .map(u -> {
                     Map<String, Object> m = new LinkedHashMap<>();
-                    m.put("id", u.getId());
                     m.put("username", u.getUsername());
                     m.put("displayName", u.getDisplayName());
-                    m.put("email", u.getEmail());
-                    m.put("role", u.getRole());
-                    m.put("active", u.isActive());
-                    m.put("createdAt", u.getCreatedAt());
                     return m;
                 })
                 .toList();
     }
 
+    private Map<String, Object> toUserSummary(UserEntity u) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("id", u.getId());
+        m.put("username", u.getUsername());
+        m.put("displayName", u.getDisplayName());
+        m.put("email", u.getEmail());
+        m.put("role", u.getRole());
+        m.put("active", u.isActive());
+        m.put("createdAt", u.getCreatedAt());
+        return m;
+    }
+
     public List<DeviceResponse> listDevices() {
-        return deviceRepository.findAllByOrderByEnrolledAtDesc()
-                .stream()
+        List<DeviceEntity> devices = SecurityUtils.isAdmin()
+                ? deviceRepository.findAllByOrderByEnrolledAtDesc()
+                : deviceRepository.findByOwnerUsernameOrderByEnrolledAtDesc(SecurityUtils.currentUsername());
+        return devices.stream()
                 .map(this::toDto)
                 .toList();
     }
@@ -117,6 +139,20 @@ public class DeviceService {
 
         UserEntity owner = userRepository.findByUsername(targetOwner)
                 .orElseThrow(() -> new ResourceNotFoundException("User not found: " + targetOwner));
+        if (!owner.isActive()) {
+            throw new AccessDeniedBusinessException("ACCOUNT_DISABLED", "Cannot enroll devices for an inactive user");
+        }
+        if (!SecurityUtils.isAdmin()) {
+            boolean hasRevokedDevice = deviceRepository.existsByOwnerUsernameAndStatus(targetOwner, "REVOKED")
+                    || revocationRepository.existsByUsername(targetOwner);
+            boolean hasActiveDevice = deviceRepository.existsByOwnerUsernameAndStatus(targetOwner, "ACTIVE");
+            if (hasRevokedDevice || !hasActiveDevice) {
+                throw new AccessDeniedBusinessException(
+                        "ADMIN_APPROVAL_REQUIRED",
+                        "Self-service enrollment denied: accounts with revoked devices or without an active approved device require ADMIN approval"
+                );
+            }
+        }
 
         String deviceUid = "dev-" + targetOwner + "-" + UUID.randomUUID().toString().substring(0, 6);
         PostQuantumCryptoService.RawKeyPair kemPair = cryptoService.generateMlKem768KeyPair();
@@ -187,6 +223,11 @@ public class DeviceService {
         device.setStatus("REVOKED");
         device.setRevokedAt(revocationStartedAt);
         deviceRepository.save(device);
+
+        // Immediately invalidate active JWTs for the revoked device's owner
+        UserEntity owner = device.getOwner();
+        owner.setTokenVersion(owner.getTokenVersion() + 1L);
+        userRepository.save(owner);
 
         long nextVersion = revocationRepository.findTopByOrderByRevocationVersionDesc()
                 .map(r -> r.getRevocationVersion() + 1L)

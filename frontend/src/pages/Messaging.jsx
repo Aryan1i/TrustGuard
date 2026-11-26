@@ -27,15 +27,18 @@ export default function Messaging({ session }) {
     setLoading(true);
     if (clearError) setError('');
     try {
-      const [msgs, sess, us, metrics] = await Promise.all([
+      const [msgs, sess, recipients, metrics] = await Promise.all([
         api.getMessages(),
         api.getSessions(),
-        api.getUsers(),
+        api.getRecipients(),
         api.getSecurityMetrics(),
       ]);
       setMessages(msgs);
       setSessions(sess);
-      setUsers(us);
+      setUsers(recipients);
+      if (recipients.length > 0 && !recipients.some((u) => u.username === recipientUsername)) {
+        setRecipientUsername(recipients[0].username);
+      }
       setSuiteResults(metrics.sessionAndDeliveryTests || []);
     } catch (err) {
       setError(err.message);
@@ -46,7 +49,7 @@ export default function Messaging({ session }) {
 
   useEffect(() => {
     load();
-  }, []);
+  }, [session?.username]);
 
   const handleSend = async (e) => {
     e.preventDefault();
@@ -115,6 +118,7 @@ export default function Messaging({ session }) {
 
   if (loading && messages.length === 0) return <LoadingState />;
 
+  const isAdmin = session?.role === 'ADMIN';
   const deliveredCount = messages.filter((m) => m.status === 'DELIVERED').length;
   const pendingCount = messages.filter((m) => m.status !== 'DELIVERED').length;
   const erasedCount = messages.filter((m) => m.forwardSecrecyErased).length;
@@ -139,9 +143,11 @@ export default function Messaging({ session }) {
       <div className="page-subheader">
         <h2 className="page-subheader-title">Secure Messaging</h2>
         <div className="flex-row">
-          <button type="button" className="btn btn-primary" disabled={busy} onClick={handleRunSuite}>
-            Run Delivery Checks
-          </button>
+          {isAdmin && (
+            <button type="button" className="btn btn-primary" disabled={busy} onClick={handleRunSuite}>
+              Run Delivery Checks
+            </button>
+          )}
           <button type="button" className="btn btn-secondary" disabled={busy} onClick={handleOpenSession}>
             + Open Session
           </button>

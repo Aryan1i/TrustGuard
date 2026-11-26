@@ -2,7 +2,6 @@ package com.trustguard.service;
 
 import com.trustguard.audit.AuditLogService;
 import com.trustguard.crypto.PostQuantumCryptoService;
-import com.trustguard.crypto.ProtectedKeyStore;
 import com.trustguard.dto.AccessCheckRequest;
 import com.trustguard.dto.AccessCheckResponse;
 import com.trustguard.entity.AccessEventEntity;
@@ -10,7 +9,6 @@ import com.trustguard.entity.DeviceEntity;
 import com.trustguard.entity.KeyVersionEntity;
 import com.trustguard.entity.ResourceEntity;
 import com.trustguard.entity.RolePermissionEntity;
-import com.trustguard.entity.SecurityAlertEntity;
 import com.trustguard.entity.SimulatedNodeEntity;
 import com.trustguard.entity.UserEntity;
 import com.trustguard.exception.AccessDeniedBusinessException;
@@ -20,11 +18,9 @@ import com.trustguard.repository.AccessEventRepository;
 import com.trustguard.repository.DeviceRepository;
 import com.trustguard.repository.ResourceRepository;
 import com.trustguard.repository.RolePermissionRepository;
-import com.trustguard.repository.SecurityAlertRepository;
 import com.trustguard.repository.SimulatedNodeRepository;
 import com.trustguard.repository.UserRepository;
 import com.trustguard.security.SecurityUtils;
-import com.trustguard.util.CanonicalJsonUtil;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -40,18 +36,19 @@ import java.util.UUID;
 @Service
 public class AccessControlService {
 
+    private static final int AUDIT_ACTOR_MAX_LEN = 64;
+
     private final UserRepository userRepository;
     private final DeviceRepository deviceRepository;
     private final ResourceRepository resourceRepository;
     private final RolePermissionRepository rolePermissionRepository;
     private final SimulatedNodeRepository nodeRepository;
     private final AccessEventRepository accessEventRepository;
-    private final SecurityAlertRepository securityAlertRepository;
     private final KeyManagementService keyManagementService;
     private final DeviceService deviceService;
     private final PostQuantumCryptoService cryptoService;
-    private final ProtectedKeyStore keyStore;
     private final AuditLogService auditLogService;
+    private final SecurityPersistenceService persistenceService;
 
     public AccessControlService(
             UserRepository userRepository,
@@ -60,12 +57,11 @@ public class AccessControlService {
             RolePermissionRepository rolePermissionRepository,
             SimulatedNodeRepository nodeRepository,
             AccessEventRepository accessEventRepository,
-            SecurityAlertRepository securityAlertRepository,
             KeyManagementService keyManagementService,
             DeviceService deviceService,
             PostQuantumCryptoService cryptoService,
-            ProtectedKeyStore keyStore,
-            AuditLogService auditLogService
+            AuditLogService auditLogService,
+            SecurityPersistenceService persistenceService
     ) {
         this.userRepository = userRepository;
         this.deviceRepository = deviceRepository;
@@ -73,16 +69,18 @@ public class AccessControlService {
         this.rolePermissionRepository = rolePermissionRepository;
         this.nodeRepository = nodeRepository;
         this.accessEventRepository = accessEventRepository;
-        this.securityAlertRepository = securityAlertRepository;
         this.keyManagementService = keyManagementService;
         this.deviceService = deviceService;
         this.cryptoService = cryptoService;
-        this.keyStore = keyStore;
         this.auditLogService = auditLogService;
+        this.persistenceService = persistenceService;
     }
 
     public List<Map<String, Object>> listResources() {
-        return resourceRepository.findAllByOrderByIdAsc().stream()
+        List<ResourceEntity> resources = SecurityUtils.isAdmin()
+                ? resourceRepository.findAllByOrderByIdAsc()
+                : resourceRepository.findByOwnerUsernameOrderByIdAsc(SecurityUtils.currentUsername());
+        return resources.stream()
                 .map(r -> {
                     Map<String, Object> m = new LinkedHashMap<>();
                     m.put("id", r.getId());
@@ -99,7 +97,14 @@ public class AccessControlService {
     }
 
     public List<Map<String, Object>> listAccessEvents() {
-        return accessEventRepository.findTop100ByOrderByTimestampUtcDesc().stream()
+        List<AccessEventEntity> events;
+        if (SecurityUtils.isAdmin()) {
+            events = accessEventRepository.findTop100ByOrderByTimestampUtcDesc();
+        } else {
+            String caller = SecurityUtils.currentUsername();
+            events = accessEventRepository.findTop100ByActorUsernameOrAuthenticatedPrincipalOrderByTimestampUtcDesc(caller, caller);
+        }
+        return events.stream()
                 .map(e -> {
                     Map<String, Object> m = new LinkedHashMap<>();
                     m.put("id", e.getId());
@@ -138,6 +143,24 @@ public class AccessControlService {
             actorUsername = req.simulatedActor().trim();
         }
 
+        byte[] validatedProtectedReadPk = null;
+        if (req.protectedRead()) {
+            if (req.publicKeyB64() == null || req.publicKeyB64().isBlank() || req.challenge() == null) {
+                throw new IllegalArgumentException("protectedRead requires publicKeyB64 and challenge");
+            }
+            try {
+                validatedProtectedReadPk = Base64.getDecoder().decode(req.publicKeyB64().trim());
+            } catch (IllegalArgumentException ex) {
+                throw new IllegalArgumentException("protectedRead publicKeyB64 must be valid Base64", ex);
+            }
+            if (validatedProtectedReadPk.length != PostQuantumCryptoService.ML_KEM_768_PUBLIC_KEY_BYTES) {
+                throw new IllegalArgumentException(
+                        "Invalid ML-KEM-768 public key length: expected "
+                                + PostQuantumCryptoService.ML_KEM_768_PUBLIC_KEY_BYTES + " bytes"
+                );
+            }
+        }
+
         String requestId = (req.requestId() != null && !req.requestId().isBlank())
                 ? req.requestId().trim()
                 : "req-" + UUID.randomUUID().toString().substring(0, 12);
@@ -170,7 +193,8 @@ public class AccessControlService {
         } else if ("REVOKED".equals(device.getStatus()) || node.getCurrentRevocationVersion() < latestRevocationVersion) {
             reason = "REVOKED_DEVICE: Device " + device.getDeviceUid() + " rejected on node " + node.getNodeCode()
                     + " (revocation v" + node.getCurrentRevocationVersion() + ")";
-            recordLiveAlert(
+            persistenceService.recordLiveAlertInNewTx(
+                    "alt",
                     "revoked_identity_activity",
                     "HIGH",
                     "DENIED_ATTEMPT",
@@ -185,11 +209,17 @@ public class AccessControlService {
             boolean keyCheckPassed = true;
             if (req.requestedKeyVersion() != null) {
                 try {
-                    keyVersion = keyManagementService.validateKeyUsage(req.requestedKeyVersion(), now);
+                    keyVersion = keyManagementService.validateKeyUsage(
+                            resource.getActiveKeyVersion().getKeyAlias(),
+                            req.requestedKeyVersion(),
+                            now
+                    );
                 } catch (AccessDeniedBusinessException ex) {
                     keyCheckPassed = false;
                     reason = ex.getMessage();
                 }
+            } else {
+                keyVersion = keyManagementService.getActiveCommittedKey(resource.getActiveKeyVersion().getKeyAlias());
             }
 
             if (keyCheckPassed) {
@@ -207,7 +237,8 @@ public class AccessControlService {
                 if (!serviceAllowedForResource || !roleAllowsService) {
                     reason = "UNAUTHORIZED_SERVICE: Role " + actor.getRole() + " or resource policy denies "
                             + req.sourceService() + " -> " + req.targetService() + " (" + req.action() + ")";
-                    recordLiveAlert(
+                    persistenceService.recordLiveAlertInNewTx(
+                            "alt",
                             "service_access_outside_approved_scope",
                             "MEDIUM",
                             "DENIED_ATTEMPT",
@@ -219,7 +250,8 @@ public class AccessControlService {
                 } else if (!isOwner && !"ADMIN".equalsIgnoreCase(actor.getRole())) {
                     reason = "WRONG_OWNER: Resource " + resource.getResourceKey() + " is owned by "
                             + resource.getOwner().getUsername() + ", not " + actorUsername;
-                    recordLiveAlert(
+                    persistenceService.recordLiveAlertInNewTx(
+                            "alt",
                             "isolated_denied_request",
                             "LOW",
                             "DENIED_ATTEMPT",
@@ -239,8 +271,8 @@ public class AccessControlService {
 
         AccessEventEntity event = new AccessEventEntity();
         event.setRequestId(requestId);
-        event.setActorUsername(actorUsername);
-        event.setAuthenticatedPrincipal(authenticatedPrincipal);
+        event.setActorUsername(truncate(actorUsername, 64));
+        event.setAuthenticatedPrincipal(truncate(authenticatedPrincipal, 64));
         event.setSimulationMode(simulationMode);
         event.setDevice(device);
         event.setSourceService(req.sourceService());
@@ -255,12 +287,12 @@ public class AccessControlService {
         event.setCreatedAt(now);
         accessEventRepository.save(event);
 
-        String auditActor = simulationMode ? (authenticatedPrincipal + "[sim:" + actorUsername + "]") : authenticatedPrincipal;
+        String auditActor = formatAuditActor(authenticatedPrincipal, actorUsername, simulationMode);
         auditLogService.appendEvent(
                 auditActor,
                 "ACCESS_" + decision,
                 req.resourceKey(),
-                "requestId=" + requestId + " node=" + node.getNodeCode() + " reason=" + reason
+                "requestId=" + requestId + " actor=" + actorUsername + " node=" + node.getNodeCode() + " reason=" + reason
         );
 
         String body = null;
@@ -268,7 +300,7 @@ public class AccessControlService {
         String proofHex = null;
 
         if ("ALLOW".equals(decision) && resource != null) {
-            byte[] dek = keyStore.loadSecret("key-v" + resource.getActiveKeyVersion().getVersionNumber() + "-dek");
+            byte[] dek = keyManagementService.loadDek(resource.getActiveKeyVersion());
             String plaintext;
             try {
                 plaintext = cryptoService.decryptAes256Gcm(
@@ -282,11 +314,7 @@ public class AccessControlService {
             }
 
             if (req.protectedRead()) {
-                if (req.publicKeyB64() == null || req.publicKeyB64().isBlank() || req.challenge() == null) {
-                    throw new IllegalArgumentException("protectedRead requires publicKeyB64 and challenge");
-                }
-                byte[] pkBytes = Base64.getDecoder().decode(req.publicKeyB64().trim());
-                PostQuantumCryptoService.KemEncapsulation encap = cryptoService.encapsulateMlKem768(pkBytes);
+                PostQuantumCryptoService.KemEncapsulation encap = cryptoService.encapsulateMlKem768(validatedProtectedReadPk);
                 try {
                     ciphertextB64 = Base64.getEncoder().encodeToString(encap.ciphertext());
                     proofHex = cryptoService.computeProtectedReadProof(encap.sharedSecret(), req.challenge(), plaintext);
@@ -318,6 +346,18 @@ public class AccessControlService {
         );
     }
 
+    static String formatAuditActor(String authenticatedPrincipal, String actorUsername, boolean simulationMode) {
+        String base = simulationMode ? (authenticatedPrincipal + "[sim:" + actorUsername + "]") : authenticatedPrincipal;
+        return truncate(base, AUDIT_ACTOR_MAX_LEN);
+    }
+
+    private static String truncate(String s, int max) {
+        if (s == null) {
+            return "";
+        }
+        return s.length() <= max ? s : s.substring(0, max);
+    }
+
     private DeviceEntity resolveDevice(Long deviceId, String actorUsername) {
         if (deviceId != null) {
             return deviceRepository.findById(deviceId).orElse(null);
@@ -325,30 +365,5 @@ public class AccessControlService {
         return deviceRepository.findFirstByOwnerUsernameAndStatusOrderByEnrolledAtDesc(actorUsername, "ACTIVE")
                 .orElseGet(() -> deviceRepository.findByOwnerUsernameOrderByEnrolledAtDesc(actorUsername)
                         .stream().findFirst().orElse(null));
-    }
-
-    private void recordLiveAlert(
-            String ruleName,
-            String severity,
-            String outcomeClassification,
-            String actor,
-            String servicePath,
-            String requestId,
-            String explanation
-    ) {
-        SecurityAlertEntity alert = new SecurityAlertEntity();
-        alert.setAlertUid("alt-" + UUID.randomUUID().toString().substring(0, 10));
-        alert.setRuleName(ruleName);
-        alert.setSeverity(severity);
-        alert.setOutcomeClassification(outcomeClassification);
-        alert.setActor(actor);
-        alert.setServicePath(servicePath);
-        alert.setEventIdsJson(CanonicalJsonUtil.toCanonicalJson(List.of(requestId)));
-        alert.setDetectedAt(Instant.now());
-        alert.setSourceEventTimeUtc(Instant.now());
-        alert.setDetectionLatencyMs(1L);
-        alert.setExplanation(explanation);
-        alert.setDatasetSource("LIVE_RUNTIME");
-        securityAlertRepository.save(alert);
     }
 }

@@ -3,14 +3,16 @@ package com.trustguard.recovery;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.trustguard.audit.AuditLogService;
+import com.trustguard.crypto.PostQuantumCryptoService;
+import com.trustguard.crypto.ProtectedKeyStore;
 import com.trustguard.dto.BackupResponse;
 import com.trustguard.entity.BackupItemEntity;
 import com.trustguard.entity.BackupRecordEntity;
-import com.trustguard.entity.DeviceEntity;
 import com.trustguard.entity.KeyVersionEntity;
 import com.trustguard.entity.ResourceEntity;
 import com.trustguard.entity.RevocationEntity;
 import com.trustguard.entity.SimulatedNodeEntity;
+import com.trustguard.entity.UserEntity;
 import com.trustguard.exception.IntegrityViolationException;
 import com.trustguard.exception.ResourceNotFoundException;
 import com.trustguard.repository.BackupItemRepository;
@@ -20,12 +22,16 @@ import com.trustguard.repository.KeyVersionRepository;
 import com.trustguard.repository.ResourceRepository;
 import com.trustguard.repository.RevocationRepository;
 import com.trustguard.repository.SimulatedNodeRepository;
+import com.trustguard.repository.UserRepository;
 import com.trustguard.security.SecurityUtils;
+import com.trustguard.service.KeyManagementService;
+import com.trustguard.service.SecurityPersistenceService;
 import com.trustguard.util.CanonicalJsonUtil;
 import com.trustguard.util.HashUtil;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -43,7 +49,12 @@ public class BackupRecoveryService {
     private final RevocationRepository revocationRepository;
     private final ResourceRepository resourceRepository;
     private final SimulatedNodeRepository nodeRepository;
+    private final UserRepository userRepository;
+    private final KeyManagementService keyManagementService;
+    private final PostQuantumCryptoService cryptoService;
+    private final ProtectedKeyStore keyStore;
     private final AuditLogService auditLogService;
+    private final SecurityPersistenceService persistenceService;
     private final ObjectMapper objectMapper;
 
     public BackupRecoveryService(
@@ -54,7 +65,12 @@ public class BackupRecoveryService {
             RevocationRepository revocationRepository,
             ResourceRepository resourceRepository,
             SimulatedNodeRepository nodeRepository,
+            UserRepository userRepository,
+            KeyManagementService keyManagementService,
+            PostQuantumCryptoService cryptoService,
+            ProtectedKeyStore keyStore,
             AuditLogService auditLogService,
+            SecurityPersistenceService persistenceService,
             ObjectMapper objectMapper
     ) {
         this.backupRecordRepository = backupRecordRepository;
@@ -64,13 +80,18 @@ public class BackupRecoveryService {
         this.revocationRepository = revocationRepository;
         this.resourceRepository = resourceRepository;
         this.nodeRepository = nodeRepository;
+        this.userRepository = userRepository;
+        this.keyManagementService = keyManagementService;
+        this.cryptoService = cryptoService;
+        this.keyStore = keyStore;
         this.auditLogService = auditLogService;
+        this.persistenceService = persistenceService;
         this.objectMapper = objectMapper;
     }
 
     public List<BackupResponse> listBackups() {
         return backupRecordRepository.findAllByOrderByCreatedAtDesc().stream()
-                .map(b -> toDto(b, "Checksum SHA-256 snapshot"))
+                .map(b -> toDto(b, "HMAC-SHA-256 + SHA-256 snapshot"))
                 .toList();
     }
 
@@ -80,8 +101,7 @@ public class BackupRecoveryService {
         String backupId = "bak-" + UUID.randomUUID().toString().substring(0, 10);
         Instant now = Instant.now();
 
-        KeyVersionEntity activeKey = keyVersionRepository.findFirstByStatusOrderByVersionNumberDesc("COMMITTED")
-                .orElseThrow(() -> new ResourceNotFoundException("No committed key version"));
+        KeyVersionEntity activeKey = keyManagementService.getActiveCommittedKey();
         long latestRevocationVersion = revocationRepository.findTopByOrderByRevocationVersionDesc()
                 .map(RevocationEntity::getRevocationVersion)
                 .orElse(0L);
@@ -102,6 +122,11 @@ public class BackupRecoveryService {
                 .map(r -> {
                     Map<String, Object> m = new LinkedHashMap<>();
                     m.put("resourceKey", r.getResourceKey());
+                    m.put("title", r.getTitle());
+                    m.put("ownerUsername", r.getOwner().getUsername());
+                    m.put("allowedServices", r.getAllowedServices());
+                    m.put("classification", r.getClassification());
+                    m.put("keyAlias", r.getActiveKeyVersion().getKeyAlias());
                     m.put("activeKeyVersion", r.getActiveKeyVersion().getVersionNumber());
                     m.put("contentCiphertextB64", r.getContentCiphertextB64());
                     m.put("contentIvB64", r.getContentIvB64());
@@ -133,6 +158,7 @@ public class BackupRecoveryService {
         record.setPayloadSnapshotJson(canonicalSnapshot);
         record.setCreatedAt(now);
         record.setVerifiedAt(now);
+        record.setHmacSha256(computeBackupHmac(record, checksum, canonicalSnapshot));
         record = backupRecordRepository.save(record);
 
         List<BackupItemEntity> items = new ArrayList<>();
@@ -162,10 +188,10 @@ public class BackupRecoveryService {
                 actor,
                 "BACKUP_CREATED",
                 backupId,
-                "Created verified synthetic backup (key v" + activeKey.getVersionNumber()
+                "Created HMAC-SHA-256 verified backup (key v" + activeKey.getVersionNumber()
                         + ", revocation v" + latestRevocationVersion + ", sha256=" + checksum.substring(0, 12) + ")"
         );
-        return toDto(record, "Created and verified SHA-256 backup snapshot");
+        return toDto(record, "Created and HMAC-verified SHA-256 backup snapshot");
     }
 
     private BackupRecordEntity resolveBackup(String identifier) {
@@ -181,7 +207,7 @@ public class BackupRecoveryService {
     public BackupResponse verifyBackup(String identifier) {
         BackupRecordEntity record = resolveBackup(identifier);
         String actualChecksum = HashUtil.sha256Hex(record.getPayloadSnapshotJson());
-        boolean valid = HashUtil.constantTimeEquals(record.getChecksumSha256(), actualChecksum);
+        boolean valid = verifyBackupIntegrity(record, actualChecksum);
 
         record.setVerificationStatus(valid ? "VERIFIED" : "CORRUPTED");
         record.setVerifiedAt(Instant.now());
@@ -192,11 +218,10 @@ public class BackupRecoveryService {
                 valid ? "BACKUP_VERIFIED" : "BACKUP_VERIFICATION_FAILED",
                 record.getBackupId(),
                 valid
-                        ? "Backup SHA-256 checksum verified: " + actualChecksum.substring(0, 12)
-                        : "CORRUPTED backup detected! Expected=" + record.getChecksumSha256().substring(0, 12)
-                        + " actual=" + actualChecksum.substring(0, 12)
+                        ? "Backup HMAC + SHA-256 integrity verified: " + actualChecksum.substring(0, 12)
+                        : "CORRUPTED backup detected! Failed SHA-256 or HMAC authentication"
         );
-        return toDto(record, valid ? "Backup checksum verified" : "Backup checksum mismatch: CORRUPTED");
+        return toDto(record, valid ? "Backup HMAC & checksum verified" : "Backup integrity mismatch: CORRUPTED");
     }
 
     @Transactional
@@ -209,90 +234,207 @@ public class BackupRecoveryService {
                 SecurityUtils.currentUsername(),
                 "BACKUP_CORRUPTION_SIMULATED",
                 record.getBackupId(),
-                "Simulated snapshot payload alteration to demonstrate checksum verification rejection"
+                "Simulated snapshot payload alteration to demonstrate HMAC/checksum verification rejection"
         );
         return toDto(record, "Simulated payload corruption applied (checksum no longer matches)");
     }
 
-    @Transactional
     public BackupResponse restoreBackup(String identifier) {
         String actor = SecurityUtils.currentUsername();
-        BackupRecordEntity record = resolveBackup(identifier);
+        BackupRecordEntity probe = resolveBackup(identifier);
+        String actualChecksum = HashUtil.sha256Hex(probe.getPayloadSnapshotJson());
 
-        String actualChecksum = HashUtil.sha256Hex(record.getPayloadSnapshotJson());
-        if (!HashUtil.constantTimeEquals(record.getChecksumSha256(), actualChecksum)) {
-            record.setVerificationStatus("CORRUPTED");
-            record.setRestoreStatus("REJECTED");
-            record.setVerifiedAt(Instant.now());
-            backupRecordRepository.save(record);
+        if (!verifyBackupIntegrity(probe, actualChecksum)) {
+            persistenceService.runInRequiresNew(() -> {
+                BackupRecordEntity failed = resolveBackup(identifier);
+                failed.setVerificationStatus("CORRUPTED");
+                failed.setRestoreStatus("REJECTED");
+                failed.setVerifiedAt(Instant.now());
+                backupRecordRepository.save(failed);
+            });
             auditLogService.appendEvent(
                     actor,
                     "BACKUP_RESTORE_REJECTED",
-                    record.getBackupId(),
-                    "Rejected restore of corrupted backup " + record.getBackupId() + " due to SHA-256 mismatch"
+                    probe.getBackupId(),
+                    "Rejected restore of corrupted/forged backup " + probe.getBackupId() + " due to HMAC/SHA-256 mismatch"
             );
             throw new IntegrityViolationException(
                     "BACKUP_CORRUPTED",
-                    "Restore rejected: backup " + record.getBackupId() + " failed SHA-256 integrity verification"
+                    "Restore rejected: backup " + probe.getBackupId() + " failed HMAC/SHA-256 integrity verification"
             );
         }
 
-        // Parse verified snapshot and monotonically preserve higher committed key version & revocations
+        // Parse verified snapshot and apply restore atomically while preserving higher committed keys & revocations
         Map<String, Object> snapshot;
         try {
-            snapshot = objectMapper.readValue(record.getPayloadSnapshotJson(), new TypeReference<>() {});
+            snapshot = objectMapper.readValue(probe.getPayloadSnapshotJson(), new TypeReference<>() {});
         } catch (Exception e) {
             throw new IntegrityViolationException("BACKUP_PARSE_ERROR", "Verified backup JSON could not be parsed");
         }
 
-        @SuppressWarnings("unchecked")
-        List<Map<String, Object>> snapDevices = (List<Map<String, Object>>) snapshot.get("devices");
-        if (snapDevices != null) {
-            for (Map<String, Object> sd : snapDevices) {
-                String deviceUid = String.valueOf(sd.get("deviceUid"));
-                String snapStatus = String.valueOf(sd.get("status"));
-                deviceRepository.findByDeviceUid(deviceUid).ifPresent(device -> {
-                    // Never un-revoke a device that has been revoked after the backup was taken!
-                    if ("REVOKED".equals(snapStatus) && !"REVOKED".equals(device.getStatus())) {
-                        device.setStatus("REVOKED");
-                        device.setRevokedAt(Instant.now());
-                        deviceRepository.save(device);
-                    }
-                });
+        return persistenceService.inTransaction(() -> {
+            BackupRecordEntity record = resolveBackup(identifier);
+            Instant now = Instant.now();
+
+            @SuppressWarnings("unchecked")
+            List<Map<String, Object>> snapDevices = (List<Map<String, Object>>) snapshot.get("devices");
+            if (snapDevices != null) {
+                for (Map<String, Object> sd : snapDevices) {
+                    String deviceUid = String.valueOf(sd.get("deviceUid"));
+                    String snapStatus = String.valueOf(sd.get("status"));
+                    deviceRepository.findByDeviceUid(deviceUid).ifPresent(device -> {
+                        // Never un-revoke a device that has been revoked after the backup was taken!
+                        if ("REVOKED".equals(snapStatus) && !"REVOKED".equals(device.getStatus())) {
+                            device.setStatus("REVOKED");
+                            device.setRevokedAt(now);
+                            deviceRepository.save(device);
+                        }
+                    });
+                }
+            }
+
+            @SuppressWarnings("unchecked")
+            List<Map<String, Object>> snapResources = (List<Map<String, Object>>) snapshot.get("resources");
+            if (snapResources != null) {
+                for (Map<String, Object> sr : snapResources) {
+                    restoreResourceSnapshot(sr, record.getKeyVersionNumber(), now);
+                }
+            }
+
+            // Ensure simulated nodes keep at least the latest revocation version & active key version
+            int currentActiveKeyVersion = keyManagementService.getActiveCommittedKey().getVersionNumber();
+            long currentRevocationVersion = revocationRepository.findTopByOrderByRevocationVersionDesc()
+                    .map(RevocationEntity::getRevocationVersion)
+                    .orElse(record.getRevocationVersion());
+
+            for (SimulatedNodeEntity node : nodeRepository.findAllByOrderByIdAsc()) {
+                node.setCurrentKeyVersion(Math.max(node.getCurrentKeyVersion(), currentActiveKeyVersion));
+                node.setCurrentRevocationVersion(Math.max(node.getCurrentRevocationVersion(), currentRevocationVersion));
+                node.setLastHeartbeatAt(now);
+                nodeRepository.save(node);
+            }
+
+            record.setVerificationStatus("VERIFIED");
+            record.setRestoreStatus("RESTORED");
+            record.setVerifiedAt(now);
+            record.setRestoredAt(now);
+            backupRecordRepository.save(record);
+
+            auditLogService.appendEvent(
+                    actor,
+                    "BACKUP_RESTORED",
+                    record.getBackupId(),
+                    "Restored verified backup " + record.getBackupId()
+                            + " (devices + resources) while preserving committed key v"
+                            + currentActiveKeyVersion + " and revocation v" + currentRevocationVersion
+            );
+
+            return toDto(record, "Restored verified backup; committed key v" + currentActiveKeyVersion
+                    + " and revocation state v" + currentRevocationVersion + " retained");
+        });
+    }
+
+    private void restoreResourceSnapshot(Map<String, Object> sr, int fallbackKeyVer, Instant now) {
+        String resourceKey = sr.get("resourceKey") != null ? String.valueOf(sr.get("resourceKey")) : null;
+        String snapCt = sr.get("contentCiphertextB64") != null ? String.valueOf(sr.get("contentCiphertextB64")) : null;
+        String snapIv = sr.get("contentIvB64") != null ? String.valueOf(sr.get("contentIvB64")) : null;
+        String snapAad = sr.get("contentAad") != null ? String.valueOf(sr.get("contentAad")) : null;
+        if (resourceKey == null || snapCt == null || snapIv == null || snapAad == null) {
+            return;
+        }
+
+        String snapAlias = sr.get("keyAlias") != null
+                ? String.valueOf(sr.get("keyAlias"))
+                : KeyManagementService.DEFAULT_ALIAS;
+        int snapKeyVerNum = (sr.get("activeKeyVersion") instanceof Number n) ? n.intValue() : fallbackKeyVer;
+
+        KeyVersionEntity currentCommittedForAlias = keyManagementService.getActiveCommittedKey(snapAlias);
+        KeyVersionEntity snapKeyEntity = keyVersionRepository
+                .findByKeyAliasAndVersionNumber(snapAlias, snapKeyVerNum)
+                .orElse(currentCommittedForAlias);
+
+        ResourceEntity existing = resourceRepository.findByResourceKey(resourceKey).orElse(null);
+        KeyVersionEntity targetKey = currentCommittedForAlias;
+        if (existing != null && existing.getActiveKeyVersion() != null
+                && existing.getActiveKeyVersion().getVersionNumber() > targetKey.getVersionNumber()
+                && snapAlias.equals(existing.getActiveKeyVersion().getKeyAlias())) {
+            targetKey = existing.getActiveKeyVersion();
+        }
+        if (targetKey.getVersionNumber() < snapKeyEntity.getVersionNumber()) {
+            targetKey = snapKeyEntity;
+        }
+
+        String finalCt = snapCt;
+        String finalIv = snapIv;
+        if (!targetKey.getId().equals(snapKeyEntity.getId())) {
+            byte[] oldDek = keyManagementService.loadDek(snapKeyEntity);
+            byte[] newDek = keyManagementService.loadDek(targetKey);
+            try {
+                String plaintext = cryptoService.decryptAes256Gcm(oldDek, snapIv, snapCt, snapAad);
+                PostQuantumCryptoService.AesGcmPayload rewrapped = cryptoService.encryptAes256Gcm(newDek, plaintext, snapAad);
+                finalCt = rewrapped.ciphertextB64();
+                finalIv = rewrapped.ivB64();
+            } finally {
+                cryptoService.zeroize(oldDek, newDek);
             }
         }
 
-        // Ensure simulated nodes keep at least the latest revocation version & active key version
-        int currentActiveKeyVersion = keyVersionRepository.findFirstByStatusOrderByVersionNumberDesc("COMMITTED")
-                .map(KeyVersionEntity::getVersionNumber)
-                .orElse(record.getKeyVersionNumber());
-        long currentRevocationVersion = revocationRepository.findTopByOrderByRevocationVersionDesc()
-                .map(RevocationEntity::getRevocationVersion)
-                .orElse(record.getRevocationVersion());
-
-        for (SimulatedNodeEntity node : nodeRepository.findAllByOrderByIdAsc()) {
-            node.setCurrentKeyVersion(Math.max(node.getCurrentKeyVersion(), currentActiveKeyVersion));
-            node.setCurrentRevocationVersion(Math.max(node.getCurrentRevocationVersion(), currentRevocationVersion));
-            node.setLastHeartbeatAt(Instant.now());
-            nodeRepository.save(node);
+        ResourceEntity entity = existing;
+        if (entity == null) {
+            String ownerUsername = sr.get("ownerUsername") != null ? String.valueOf(sr.get("ownerUsername")) : null;
+            if (ownerUsername == null) {
+                return;
+            }
+            UserEntity owner = userRepository.findByUsername(ownerUsername).orElse(null);
+            if (owner == null) {
+                return;
+            }
+            entity = new ResourceEntity();
+            entity.setResourceKey(resourceKey);
+            entity.setOwner(owner);
+            entity.setCreatedAt(now);
         }
 
-        record.setVerificationStatus("VERIFIED");
-        record.setRestoreStatus("RESTORED");
-        record.setVerifiedAt(Instant.now());
-        record.setRestoredAt(Instant.now());
-        backupRecordRepository.save(record);
+        if (sr.get("title") != null) {
+            entity.setTitle(String.valueOf(sr.get("title")));
+        }
+        if (sr.get("allowedServices") != null) {
+            entity.setAllowedServices(String.valueOf(sr.get("allowedServices")));
+        }
+        if (sr.get("classification") != null) {
+            entity.setClassification(String.valueOf(sr.get("classification")));
+        }
+        entity.setContentCiphertextB64(finalCt);
+        entity.setContentIvB64(finalIv);
+        entity.setContentAad(snapAad);
+        entity.setActiveKeyVersion(targetKey);
+        entity.setUpdatedAt(now);
+        resourceRepository.save(entity);
+    }
 
-        auditLogService.appendEvent(
-                actor,
-                "BACKUP_RESTORED",
-                record.getBackupId(),
-                "Restored verified backup " + record.getBackupId() + " while preserving committed key v"
-                        + currentActiveKeyVersion + " and revocation v" + currentRevocationVersion
-        );
+    private boolean verifyBackupIntegrity(BackupRecordEntity record, String actualChecksum) {
+        if (!HashUtil.constantTimeEquals(record.getChecksumSha256(), actualChecksum)) {
+            return false;
+        }
+        if (record.getHmacSha256() == null || record.getHmacSha256().isBlank()) {
+            return false;
+        }
+        String expectedHmac = computeBackupHmac(record, actualChecksum, record.getPayloadSnapshotJson());
+        return HashUtil.constantTimeEquals(record.getHmacSha256(), expectedHmac);
+    }
 
-        return toDto(record, "Restored verified backup; committed key v" + currentActiveKeyVersion
-                + " and revocation state v" + currentRevocationVersion + " retained");
+    private String computeBackupHmac(BackupRecordEntity record, String checksumSha256, String payloadSnapshotJson) {
+        byte[] hmacKey = keyStore.getOrCreateBackupHmacKey();
+        try {
+            String binding = record.getBackupId()
+                    + "|" + record.getKeyVersionNumber()
+                    + "|" + record.getRevocationVersion()
+                    + "|" + checksumSha256
+                    + "|" + payloadSnapshotJson;
+            return HashUtil.hmacSha256Hex(hmacKey, binding.getBytes(StandardCharsets.UTF_8));
+        } finally {
+            cryptoService.zeroize(hmacKey);
+        }
     }
 
     private BackupResponse toDto(BackupRecordEntity b, String message) {

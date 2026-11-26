@@ -21,16 +21,20 @@ import com.trustguard.repository.UserRepository;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.ApplicationArguments;
 import org.springframework.boot.ApplicationRunner;
+import org.springframework.core.env.Environment;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.List;
 
 @Component
 public class DataInitializer implements ApplicationRunner {
+
+    public static final String DEFAULT_DEMO_PASSWORD = "TrustGuard!Demo2026";
 
     private final UserRepository userRepository;
     private final DeviceRepository deviceRepository;
@@ -44,6 +48,7 @@ public class DataInitializer implements ApplicationRunner {
     private final ProtectedKeyStore keyStore;
     private final AuditLogService auditLogService;
     private final DetectionOrchestrationService detectionService;
+    private final Environment environment;
     private final boolean seedEnabled;
     private final String demoPassword;
 
@@ -60,6 +65,7 @@ public class DataInitializer implements ApplicationRunner {
             ProtectedKeyStore keyStore,
             AuditLogService auditLogService,
             DetectionOrchestrationService detectionService,
+            Environment environment,
             @Value("${trustguard.demo.seed-enabled:true}") boolean seedEnabled,
             @Value("${TRUSTGUARD_DEMO_PASSWORD:TrustGuard!Demo2026}") String demoPassword
     ) {
@@ -75,13 +81,26 @@ public class DataInitializer implements ApplicationRunner {
         this.keyStore = keyStore;
         this.auditLogService = auditLogService;
         this.detectionService = detectionService;
+        this.environment = environment;
         this.seedEnabled = seedEnabled;
         this.demoPassword = demoPassword;
+    }
+
+    public void validateStartupConfiguration() {
+        boolean isDevOrTest = environment != null && Arrays.stream(environment.getActiveProfiles())
+                .anyMatch(p -> "local".equalsIgnoreCase(p) || "test".equalsIgnoreCase(p));
+        if (!isDevOrTest && seedEnabled && DEFAULT_DEMO_PASSWORD.equals(demoPassword)) {
+            throw new IllegalStateException(
+                    "Refusing to enable demo user seeding with default credentials outside local/test profiles; "
+                            + "disable trustguard.demo.seed-enabled or override TRUSTGUARD_DEMO_PASSWORD"
+            );
+        }
     }
 
     @Override
     @Transactional
     public void run(ApplicationArguments args) {
+        validateStartupConfiguration();
         if (!seedEnabled || userRepository.count() > 0) {
             return;
         }
@@ -102,8 +121,16 @@ public class DataInitializer implements ApplicationRunner {
         // Seed initial committed key v1
         PostQuantumCryptoService.RawKeyPair v1Kem = cryptoService.generateMlKem768KeyPair();
         byte[] v1Dek = cryptoService.generateRandomAes256Key();
-        String v1PrivRef = keyStore.storeSecret("key-v1-mlkem768-priv", v1Kem.privateKey());
-        keyStore.storeSecret("key-v1-dek", v1Dek);
+        String v1PrivRef = keyStore.storeSecret(
+                com.trustguard.service.KeyManagementService.kemPrivSecretId(
+                        com.trustguard.service.KeyManagementService.DEFAULT_ALIAS, 1),
+                v1Kem.privateKey()
+        );
+        keyStore.storeSecret(
+                com.trustguard.service.KeyManagementService.dekSecretId(
+                        com.trustguard.service.KeyManagementService.DEFAULT_ALIAS, 1),
+                v1Dek
+        );
 
         Instant now = Instant.now();
         KeyVersionEntity v1 = new KeyVersionEntity();

@@ -9,4 +9,5 @@ import java.util.Optional;
 public interface ResourceRepository extends JpaRepository<ResourceEntity, Long> {
     Optional<ResourceEntity> findByResourceKey(String resourceKey);
     List<ResourceEntity> findAllByOrderByIdAsc();
+    List<ResourceEntity> findByOwnerUsernameOrderByIdAsc(String username);
 }

@@ -4,13 +4,18 @@ import com.trustguard.audit.AuditLogService;
 import com.trustguard.dto.AuthResponse;
 import com.trustguard.dto.LoginRequest;
 import com.trustguard.entity.UserEntity;
+import com.trustguard.exception.RateLimitExceededException;
 import com.trustguard.exception.ResourceNotFoundException;
 import com.trustguard.repository.UserRepository;
+import com.trustguard.security.AuthRateLimiter;
 import com.trustguard.security.JwtService;
 import com.trustguard.security.SecurityUtils;
+import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.AuthenticationException;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -28,17 +33,20 @@ public class AuthController {
     private final UserRepository userRepository;
     private final JwtService jwtService;
     private final AuditLogService auditLogService;
+    private final AuthRateLimiter authRateLimiter;
 
     public AuthController(
             AuthenticationManager authenticationManager,
             UserRepository userRepository,
             JwtService jwtService,
-            AuditLogService auditLogService
+            AuditLogService auditLogService,
+            AuthRateLimiter authRateLimiter
     ) {
         this.authenticationManager = authenticationManager;
         this.userRepository = userRepository;
         this.jwtService = jwtService;
         this.auditLogService = auditLogService;
+        this.authRateLimiter = authRateLimiter;
     }
 
     @GetMapping("/health")
@@ -51,13 +59,35 @@ public class AuthController {
     }
 
     @PostMapping("/auth/login")
-    public AuthResponse login(@Valid @RequestBody LoginRequest request) {
-        authenticationManager.authenticate(
-                new UsernamePasswordAuthenticationToken(request.username().trim(), request.password())
-        );
-        UserEntity user = userRepository.findByUsername(request.username().trim())
+    public AuthResponse login(@Valid @RequestBody LoginRequest request, HttpServletRequest httpRequest) {
+        String trimmedUsername = request.username().trim();
+        String clientIp = httpRequest != null ? httpRequest.getRemoteAddr() : "unknown";
+
+        try {
+            authRateLimiter.checkAllowed(trimmedUsername, clientIp);
+        } catch (RateLimitExceededException ex) {
+            auditLogService.appendEvent(
+                    trimmedUsername.isEmpty() ? "anonymous" : trimmedUsername,
+                    "AUTH_RATE_LIMITED",
+                    "identity",
+                    "Login temporarily throttled due to repeated authentication failures from ip=" + clientIp
+            );
+            throw ex;
+        }
+
+        try {
+            authenticationManager.authenticate(
+                    new UsernamePasswordAuthenticationToken(trimmedUsername, request.password())
+            );
+        } catch (AuthenticationException ex) {
+            authRateLimiter.recordFailure(trimmedUsername, clientIp);
+            throw ex;
+        }
+
+        authRateLimiter.recordSuccess(trimmedUsername);
+        UserEntity user = userRepository.findByUsername(trimmedUsername)
                 .orElseThrow(() -> new ResourceNotFoundException("User not found"));
-        JwtService.TokenResult token = jwtService.generateToken(user.getUsername(), user.getRole());
+        JwtService.TokenResult token = jwtService.generateToken(user.getUsername(), user.getRole(), user.getTokenVersion());
         auditLogService.appendEvent(
                 user.getUsername(),
                 "AUTH_SIGN_IN",
@@ -72,6 +102,27 @@ public class AuthController {
                 user.getRole(),
                 token.expiresAt(),
                 true
+        );
+    }
+
+    @PostMapping("/auth/logout")
+    @Transactional
+    public Map<String, Object> logout() {
+        String username = SecurityUtils.currentUsername();
+        UserEntity user = userRepository.findByUsername(username)
+                .orElseThrow(() -> new ResourceNotFoundException("User not found"));
+        user.setTokenVersion(user.getTokenVersion() + 1L);
+        userRepository.save(user);
+        auditLogService.appendEvent(
+                username,
+                "AUTH_SIGN_OUT",
+                "identity",
+                "Signed out caller and invalidated active JWTs (tokenVersion=" + user.getTokenVersion() + ")"
+        );
+        return Map.of(
+                "loggedOut", true,
+                "username", user.getUsername(),
+                "tokenVersion", user.getTokenVersion()
         );
     }
 

@@ -15,7 +15,14 @@ const SECURITY_ALERT_LABELS = new Set([
   'review_after_role_change',
   'lateral_movement_candidate',
   'isolated_denial',
+  'unexpected_service_access',
+  'suspicious_clock_offset',
 ]);
+
+const MAX_PLAUSIBLE_CLOCK_OFFSET_MS = 30_000;
+const MAX_PLAUSIBLE_OFFSET_DELAY_MS = 30_000;
+const LATERAL_MOVEMENT_WINDOW_MS = 300_000;
+const POST_REVOCATION_TRANSITION_WINDOW_MS = 60_000;
 
 function makeError(message, status = 400, code = 'BAD_REQUEST') {
   const err = new Error(message);
@@ -86,9 +93,9 @@ async function appendAudit(state, actor, action, resource, detail) {
     id: seqNumber,
     eventId,
     seqNumber,
-    actor,
-    action,
-    resource,
+    actor: String(actor || '').slice(0, 64),
+    action: String(action || '').slice(0, 80),
+    resource: String(resource || '').slice(0, 128),
     detail: String(detail || '').slice(0, 500),
     eventTimestampUtc,
     prevHash,
@@ -99,81 +106,158 @@ async function appendAudit(state, actor, action, resource, detail) {
   return entry;
 }
 
-function runDeterministicDetection() {
-  const maxByActorSess = new Map();
-  const annotated = PRACTICE_EVENTS.map((raw) => {
-    const rawMs = Date.parse(raw.eventTimeUtc);
-    const corrMs = rawMs - raw.sourceClockOffsetMs;
-    const recMs = Date.parse(raw.receivedTimeUtc);
-    const correctedEventTimeUtc = new Date(corrMs).toISOString();
-    const deliveryDelayMs = recMs - corrMs;
-    const key = `${raw.actor}|${raw.sessionId}`;
-    const prevMax = maxByActorSess.get(key);
-    const outOfOrderArrival = prevMax !== undefined && corrMs < prevMax;
-    if (prevMax === undefined || corrMs > prevMax) {
-      maxByActorSess.set(key, corrMs);
+export function runDeterministicDetection(events = PRACTICE_EVENTS, approvals = PRACTICE_APPROVALS) {
+  const isImplausibleClockOffset = (evt, corrMs, recMs, delayMs) => {
+    const offset = Number(evt.sourceClockOffsetMs || 0);
+    if (Math.abs(offset) > MAX_PLAUSIBLE_CLOCK_OFFSET_MS) return true;
+    if (delayMs < 0) return true;
+    if (offset !== 0 && delayMs > MAX_PLAUSIBLE_OFFSET_DELAY_MS) return true;
+    if (offset > 0) {
+      for (const a of approvals) {
+        if (
+          a.operation === 'grant_role' &&
+          a.subject === evt.actor &&
+          a.validUntilUtc &&
+          corrMs < Date.parse(a.validUntilUtc) &&
+          recMs > Date.parse(a.validUntilUtc) + 5000
+        ) {
+          return true;
+        }
+      }
     }
-    return { raw, corrMs, correctedEventTimeUtc, deliveryDelayMs, outOfOrderArrival };
-  });
+    return false;
+  };
 
-  const findGrantApproval = (evt, corrMs) =>
-    PRACTICE_APPROVALS.find(
+  const isRoleRevokedAt = (actor, role, policyMs) =>
+    approvals.some(
+      (a) =>
+        a.operation === 'revoke_role' &&
+        a.subject === actor &&
+        (!role || role === a.role) &&
+        a.effectiveAtUtc &&
+        policyMs >= Date.parse(a.effectiveAtUtc)
+    );
+
+  const findGrantApproval = (evt, policyMs) =>
+    approvals.find(
       (a) =>
         a.operation === 'grant_role' &&
         a.subject === evt.actor &&
         a.role === evt.roleAfter &&
         (!evt.approvalId || a.approvalId === evt.approvalId) &&
-        corrMs >= Date.parse(a.validFromUtc) &&
-        corrMs < Date.parse(a.validUntilUtc)
+        policyMs >= Date.parse(a.validFromUtc) &&
+        policyMs < Date.parse(a.validUntilUtc) &&
+        !isRoleRevokedAt(evt.actor, evt.roleAfter, policyMs)
     );
 
-  const isPostRevokeDenial = (evt, corrMs) => {
+  const isPostRevokeDenial = (evt, policyMs) => {
     if (evt.outcome.toLowerCase() !== 'deny') return false;
-    const revoked = PRACTICE_APPROVALS.some(
-      (a) => a.operation === 'revoke_role' && a.subject === evt.actor && corrMs >= Date.parse(a.effectiveAtUtc)
+    const withinTransitionWindow = approvals.some(
+      (a) =>
+        a.operation === 'revoke_role' &&
+        a.subject === evt.actor &&
+        a.effectiveAtUtc &&
+        policyMs >= Date.parse(a.effectiveAtUtc) &&
+        policyMs <= Date.parse(a.effectiveAtUtc) + POST_REVOCATION_TRANSITION_WINDOW_MS
     );
-    if (!revoked) return false;
-    return PRACTICE_APPROVALS.some(
+    if (!withinTransitionWindow) return false;
+    return approvals.some(
       (a) => a.operation === 'grant_role' && a.subject === evt.actor && (a.scope || []).includes(evt.targetService)
     );
   };
 
-  const isKnownNormalEdge = (evt, corrMs) => {
+  const isKnownNormalEdge = (evt, policyMs) => {
     const { sourceService: src, targetService: dst, roleAfter: role, actor } = evt;
     if (src === 'portal' && (dst === 'identity' || dst === 'catalog')) return true;
     if (src === 'admin-console' && dst === 'identity' && role === 'operator') return true;
     if (actor === 'svc-report-worker' && src === 'reports' && dst === 'catalog') return true;
-    if (role === 'report-reader') {
-      return PRACTICE_APPROVALS.some(
+    if (role === 'report-reader' && src === 'portal') {
+      return approvals.some(
         (a) =>
           a.operation === 'grant_role' &&
           a.subject === actor &&
           a.role === role &&
           (a.scope || []).includes(dst) &&
-          corrMs >= Date.parse(a.validFromUtc) &&
-          corrMs < Date.parse(a.validUntilUtc)
+          !isRoleRevokedAt(actor, role, policyMs) &&
+          policyMs >= Date.parse(a.validFromUtc) &&
+          policyMs < Date.parse(a.validUntilUtc)
       );
     }
     return false;
   };
 
-  const unapprovedRoleChange = new Map();
+  const maxByActorSess = new Map();
+  const annotated = events.map((raw, orderIndex) => {
+    const rawMs = Date.parse(raw.eventTimeUtc);
+    const corrMs = rawMs - raw.sourceClockOffsetMs;
+    const recMs = Date.parse(raw.receivedTimeUtc);
+    const correctedEventTimeUtc = new Date(corrMs).toISOString();
+    const deliveryDelayMs = recMs - corrMs;
+    const implausibleClockOffset = isImplausibleClockOffset(raw, corrMs, recMs, deliveryDelayMs);
+    const policyMs = implausibleClockOffset ? recMs : corrMs;
+    const policyTimeUtc = new Date(policyMs).toISOString();
+
+    const key = `${raw.actor}|${raw.sessionId}`;
+    const prevMax = maxByActorSess.get(key);
+    const outOfOrderArrival = prevMax !== undefined && policyMs < prevMax;
+    if (!implausibleClockOffset && (prevMax === undefined || policyMs > prevMax)) {
+      maxByActorSess.set(key, policyMs);
+    }
+    return {
+      orderIndex,
+      raw,
+      corrMs,
+      policyMs,
+      correctedEventTimeUtc,
+      policyTimeUtc,
+      deliveryDelayMs,
+      outOfOrderArrival,
+      implausibleClockOffset,
+    };
+  });
+
+  // Track unapproved role_change events per actor across sessions
+  const unapprovedRoleChangesByActor = new Map();
   for (const ae of annotated) {
     const e = ae.raw;
     if (e.action === 'role_change' && e.roleBefore !== e.roleAfter) {
-      if (!findGrantApproval(e, ae.corrMs)) {
-        unapprovedRoleChange.set(`${e.actor}|${e.sessionId}`, e.eventId);
+      if (!findGrantApproval(e, ae.policyMs)) {
+        if (!unapprovedRoleChangesByActor.has(e.actor)) {
+          unapprovedRoleChangesByActor.set(e.actor, []);
+        }
+        unapprovedRoleChangesByActor.get(e.actor).push({
+          orderIndex: ae.orderIndex,
+          policyMs: ae.policyMs,
+          eventId: e.eventId,
+          sessionId: e.sessionId,
+        });
       }
     }
   }
 
-  const unexpectedFlows = new Map();
+  const findPriorRoleEscalation = (actor, ae) => {
+    const list = unapprovedRoleChangesByActor.get(actor);
+    if (!list || list.length === 0) return null;
+    let matched = null;
+    for (const rc of list) {
+      if (rc.eventId === ae.raw.eventId) continue;
+      if (ae.policyMs > rc.policyMs || (ae.policyMs >= rc.policyMs && ae.orderIndex > rc.orderIndex)) {
+        matched = rc;
+      }
+    }
+    return matched;
+  };
+
+  // Multi-hop unexpected edges grouped per actor within bounded window regardless of session/correlation rotation
+  const unexpectedEdgesByActor = new Map();
   for (const ae of annotated) {
     const e = ae.raw;
-    if (e.outcome.toLowerCase() === 'deny' && !isPostRevokeDenial(e, ae.corrMs) && !isKnownNormalEdge(e, ae.corrMs)) {
-      const fk = `${e.actor}|${e.sessionId}|${e.correlationId}`;
-      if (!unexpectedFlows.has(fk)) unexpectedFlows.set(fk, []);
-      unexpectedFlows.get(fk).push(ae);
+    const out = e.outcome.toLowerCase();
+    if (out !== 'deny' && out !== 'allow') continue;
+    if (out === 'allow' && findPriorRoleEscalation(e.actor, ae)) continue;
+    if (!isPostRevokeDenial(e, ae.policyMs) && !isKnownNormalEdge(e, ae.policyMs)) {
+      if (!unexpectedEdgesByActor.has(e.actor)) unexpectedEdgesByActor.set(e.actor, []);
+      unexpectedEdgesByActor.get(e.actor).push(ae);
     }
   }
 
@@ -181,39 +265,61 @@ function runDeterministicDetection() {
   const alerts = [];
   let seq = 1;
 
-  for (const seqEvents of unexpectedFlows.values()) {
-    if (seqEvents.length >= 2) {
-      const ids = seqEvents.map((a) => a.raw.eventId);
-      ids.forEach((id) => lateralIds.add(id));
-      const hops = seqEvents.map((a, idx) =>
-        idx === 0 ? `${a.raw.sourceService} -> ${a.raw.targetService}` : a.raw.targetService
-      );
-      const first = seqEvents[0].raw;
-      alerts.push({
-        alertUid: `prac-alt-${seq++}`,
-        ruleName: 'lateral_movement_candidate',
-        severity: 'HIGH',
-        outcomeClassification: 'DENIED_ATTEMPT',
-        actor: first.actor,
-        servicePath: hops.join(' -> '),
-        eventIds: ids,
-        correlationId: first.correlationId,
-        sessionId: first.sessionId,
-        timestamp: seqEvents[seqEvents.length - 1].correctedEventTimeUtc,
-        explanation: `${seqEvents.length} sequential unexpected service edges grouped in session ${first.sessionId} / ${first.correlationId}. All requests were DENIED; classified as candidate lateral-movement reconnaissance, NOT successful compromise.`,
-        datasetSource: 'PRACTICE_22_EVENTS',
-      });
+  for (const list of unexpectedEdgesByActor.values()) {
+    const sorted = [...list].sort((a, b) => a.policyMs - b.policyMs || a.orderIndex - b.orderIndex);
+    const clusters = [];
+    let current = [];
+    for (const item of sorted) {
+      if (current.length === 0 || item.policyMs - current[current.length - 1].policyMs <= LATERAL_MOVEMENT_WINDOW_MS) {
+        current.push(item);
+      } else {
+        clusters.push(current);
+        current = [item];
+      }
+    }
+    if (current.length > 0) clusters.push(current);
+
+    for (const seqEvents of clusters) {
+      if (seqEvents.length >= 2) {
+        const ids = seqEvents.map((a) => a.raw.eventId);
+        ids.forEach((id) => lateralIds.add(id));
+        const hops = seqEvents.map((a, idx) =>
+          idx === 0 ? `${a.raw.sourceService} -> ${a.raw.targetService}` : a.raw.targetService
+        );
+        const first = seqEvents[0].raw;
+        const hasAllowedHop = seqEvents.some((a) => a.raw.outcome.toLowerCase() === 'allow');
+        const sessions = [...new Set(seqEvents.map((a) => a.raw.sessionId).filter(Boolean))];
+        const correlations = [...new Set(seqEvents.map((a) => a.raw.correlationId).filter(Boolean))];
+        const sessSummary = sessions.join(',');
+        const corrSummary = correlations.join(',');
+
+        alerts.push({
+          alertUid: `prac-alt-${seq++}`,
+          ruleName: 'lateral_movement_candidate',
+          severity: hasAllowedHop ? 'CRITICAL' : 'HIGH',
+          outcomeClassification: hasAllowedHop ? 'CONFIRMED_VIOLATION' : 'DENIED_ATTEMPT',
+          actor: first.actor,
+          servicePath: hops.join(' -> '),
+          eventIds: ids,
+          correlationId: corrSummary,
+          sessionId: sessSummary,
+          timestamp: seqEvents[seqEvents.length - 1].correctedEventTimeUtc,
+          explanation: hasAllowedHop
+            ? `${seqEvents.length} sequential unexpected service edges by ${first.actor} within ${LATERAL_MOVEMENT_WINDOW_MS / 1000}s window (session ${sessSummary} / flow ${corrSummary}). Includes unexpected ALLOWED edge(s).`
+            : `${seqEvents.length} sequential unexpected service edges grouped in session ${sessSummary} / ${corrSummary}. All requests were DENIED; classified as candidate lateral-movement reconnaissance, NOT successful compromise.`,
+          datasetSource: 'PRACTICE_22_EVENTS',
+        });
+      }
     }
   }
 
   const classifiedEvents = annotated.map((ae) => {
     const e = ae.raw;
-    const key = `${e.actor}|${e.sessionId}`;
     let predictedLabel = 'routine';
     let explanation = 'Authorized activity within expected role and service scope.';
 
     if (e.action === 'approve_role_change') {
-      const match = PRACTICE_APPROVALS.find((a) => a.approvalId === e.approvalId && a.approvedBy === e.actor);
+      const match = approvals.find((a) => a.approvalId === e.approvalId && a.approvedBy === e.actor);
       predictedLabel = match ? 'approved_change' : 'unexpected_role_change';
       explanation = match
         ? `Operator ${e.actor} approved change ${match.approvalId} matching change-control policy.`
@@ -235,7 +341,7 @@ function runDeterministicDetection() {
         });
       }
     } else if (e.action === 'revoke_role') {
-      const match = PRACTICE_APPROVALS.find(
+      const match = approvals.find(
         (a) => a.operation === 'revoke_role' && a.approvalId === e.approvalId && a.approvedBy === e.actor
       );
       predictedLabel = match ? 'approved_change' : 'unexpected_role_change';
@@ -259,8 +365,8 @@ function runDeterministicDetection() {
         });
       }
     } else if (e.action === 'role_change' && e.roleBefore !== e.roleAfter) {
-      const match = findGrantApproval(e, ae.corrMs);
-      if (match) {
+      const match = findGrantApproval(e, ae.policyMs);
+      if (match && !ae.implausibleClockOffset) {
         predictedLabel = 'approved_change';
         explanation = `Role change ${e.roleBefore} -> ${e.roleAfter} for ${e.actor} matches ${match.approvalId}.`;
         alerts.push({
@@ -279,7 +385,9 @@ function runDeterministicDetection() {
         });
       } else {
         predictedLabel = 'unexpected_role_change';
-        explanation = `No matching approval record found for ${e.actor} transitioning from ${e.roleBefore} to ${e.roleAfter}.`;
+        explanation = ae.implausibleClockOffset
+          ? `Role change clock offset (${e.sourceClockOffsetMs}ms) rejected; no active approval at collector time ${ae.policyTimeUtc}.`
+          : `No matching approval record found for ${e.actor} transitioning from ${e.roleBefore} to ${e.roleAfter}.`;
         alerts.push({
           alertUid: `prac-alt-${seq++}`,
           ruleName: 'unauthorized_role_change',
@@ -290,90 +398,161 @@ function runDeterministicDetection() {
           eventIds: [e.eventId],
           correlationId: e.correlationId,
           sessionId: e.sessionId,
+          timestamp: ae.policyTimeUtc,
+          explanation,
+          datasetSource: 'PRACTICE_22_EVENTS',
+        });
+        if (ae.implausibleClockOffset) {
+          alerts.push({
+            alertUid: `prac-alt-${seq++}`,
+            ruleName: 'implausible_clock_offset',
+            severity: 'HIGH',
+            outcomeClassification: 'CONFIRMED_VIOLATION',
+            actor: e.actor,
+            servicePath: `${e.sourceService} -> ${e.targetService}`,
+            eventIds: [e.eventId],
+            correlationId: e.correlationId,
+            sessionId: e.sessionId,
+            timestamp: ae.policyTimeUtc,
+            explanation: `Implausible sourceClockOffsetMs (${e.sourceClockOffsetMs}ms) attempted to shift timestamp across approval boundary.`,
+            datasetSource: 'PRACTICE_22_EVENTS',
+          });
+        }
+      }
+    } else {
+      const priorEscalation = e.outcome.toLowerCase() === 'allow' ? findPriorRoleEscalation(e.actor, ae) : null;
+      if (priorEscalation) {
+        predictedLabel = 'review_after_role_change';
+        const sessNote =
+          priorEscalation.sessionId === e.sessionId
+            ? `in session ${e.sessionId}`
+            : `following cross-session escalation from ${priorEscalation.sessionId} to ${e.sessionId}`;
+        explanation = `Allowed access on ${e.targetService} directly follows unapproved role change ${priorEscalation.eventId} ${sessNote}.`;
+        alerts.push({
+          alertUid: `prac-alt-${seq++}`,
+          ruleName: 'suspicious_privilege_escalation',
+          severity: 'CRITICAL',
+          outcomeClassification: 'CONFIRMED_VIOLATION',
+          actor: e.actor,
+          servicePath: `${e.sourceService} -> ${e.targetService}`,
+          eventIds: [priorEscalation.eventId, e.eventId],
+          correlationId: e.correlationId,
+          sessionId: e.sessionId,
+          timestamp: ae.policyTimeUtc,
+          explanation,
+          datasetSource: 'PRACTICE_22_EVENTS',
+        });
+      } else if (ae.implausibleClockOffset) {
+        predictedLabel = 'suspicious_clock_offset';
+        explanation = `Rejected implausible sourceClockOffsetMs (${e.sourceClockOffsetMs}ms, delay ${ae.deliveryDelayMs}ms): evaluated against collector time ${ae.policyTimeUtc}.`;
+        alerts.push({
+          alertUid: `prac-alt-${seq++}`,
+          ruleName: 'implausible_clock_offset',
+          severity: 'HIGH',
+          outcomeClassification: 'CONFIRMED_VIOLATION',
+          actor: e.actor,
+          servicePath: `${e.sourceService} -> ${e.targetService}`,
+          eventIds: [e.eventId],
+          correlationId: e.correlationId,
+          sessionId: e.sessionId,
+          timestamp: ae.policyTimeUtc,
+          explanation,
+          datasetSource: 'PRACTICE_22_EVENTS',
+        });
+      } else if (lateralIds.has(e.eventId)) {
+        if (e.outcome.toLowerCase() === 'allow') {
+          predictedLabel = 'unexpected_service_access';
+          explanation = `Allowed unexpected service edge (${e.sourceService} -> ${e.targetService}) within multi-hop sequence by ${e.actor}.`;
+          alerts.push({
+            alertUid: `prac-alt-${seq++}`,
+            ruleName: 'unexpected_allowed_service_edge',
+            severity: 'HIGH',
+            outcomeClassification: 'CONFIRMED_VIOLATION',
+            actor: e.actor,
+            servicePath: `${e.sourceService} -> ${e.targetService}`,
+            eventIds: [e.eventId],
+            correlationId: e.correlationId,
+            sessionId: e.sessionId,
+            timestamp: ae.policyTimeUtc,
+            explanation,
+            datasetSource: 'PRACTICE_22_EVENTS',
+          });
+        } else {
+          predictedLabel = 'lateral_movement_candidate';
+          explanation = `Part of multi-edge denied sequence (${e.sourceService} -> ${e.targetService}) in ${e.correlationId}; request was DENIED.`;
+        }
+      } else if (isPostRevokeDenial(e, ae.policyMs)) {
+        predictedLabel = 'routine_denial';
+        explanation = `Expected post-revocation denial on ${e.targetService} within transition window after role expiration/revocation.`;
+      } else if (e.outcome.toLowerCase() === 'deny') {
+        predictedLabel = 'isolated_denial';
+        explanation = `Single isolated denied request to ${e.targetService} in ${e.sessionId}; does not establish lateral movement.`;
+        alerts.push({
+          alertUid: `prac-alt-${seq++}`,
+          ruleName: 'isolated_denied_request',
+          severity: 'LOW',
+          outcomeClassification: 'DENIED_ATTEMPT',
+          actor: e.actor,
+          servicePath: `${e.sourceService} -> ${e.targetService}`,
+          eventIds: [e.eventId],
+          correlationId: e.correlationId,
+          sessionId: e.sessionId,
+          timestamp: ae.policyTimeUtc,
+          explanation,
+          datasetSource: 'PRACTICE_22_EVENTS',
+        });
+      } else if (e.outcome.toLowerCase() === 'allow' && !isKnownNormalEdge(e, ae.policyMs)) {
+        predictedLabel = 'unexpected_service_access';
+        explanation = `Allowed access on unexpected non-normal service edge ${e.sourceService} -> ${e.targetService} for actor ${e.actor} (role ${e.roleAfter}).`;
+        alerts.push({
+          alertUid: `prac-alt-${seq++}`,
+          ruleName: 'unexpected_allowed_service_edge',
+          severity: 'HIGH',
+          outcomeClassification: 'CONFIRMED_VIOLATION',
+          actor: e.actor,
+          servicePath: `${e.sourceService} -> ${e.targetService}`,
+          eventIds: [e.eventId],
+          correlationId: e.correlationId,
+          sessionId: e.sessionId,
+          timestamp: ae.policyTimeUtc,
+          explanation,
+          datasetSource: 'PRACTICE_22_EVENTS',
+        });
+      } else if (e.sourceClockOffsetMs !== 0) {
+        predictedLabel = 'routine_clock_offset';
+        explanation = `Source clock offset ${e.sourceClockOffsetMs}ms subtracted: corrected event time ${ae.correctedEventTimeUtc} yields ${ae.deliveryDelayMs}ms collector delay.`;
+        alerts.push({
+          alertUid: `prac-alt-${seq++}`,
+          ruleName: 'uncertain_timestamp_ordering',
+          severity: 'INFO',
+          outcomeClassification: 'INFO',
+          actor: e.actor,
+          servicePath: `${e.sourceService} -> ${e.targetService}`,
+          eventIds: [e.eventId],
+          correlationId: e.correlationId,
+          sessionId: e.sessionId,
+          timestamp: ae.correctedEventTimeUtc,
+          explanation,
+          datasetSource: 'PRACTICE_22_EVENTS',
+        });
+      } else if (ae.outOfOrderArrival) {
+        predictedLabel = 'routine_delayed_delivery';
+        explanation = `Out-of-order delivery: occurred at ${ae.correctedEventTimeUtc} before preceding received event, arrived at ${e.receivedTimeUtc}.`;
+        alerts.push({
+          alertUid: `prac-alt-${seq++}`,
+          ruleName: 'uncertain_timestamp_ordering',
+          severity: 'INFO',
+          outcomeClassification: 'INFO',
+          actor: e.actor,
+          servicePath: `${e.sourceService} -> ${e.targetService}`,
+          eventIds: [e.eventId],
+          correlationId: e.correlationId,
+          sessionId: e.sessionId,
           timestamp: ae.correctedEventTimeUtc,
           explanation,
           datasetSource: 'PRACTICE_22_EVENTS',
         });
       }
-    } else if (
-      unapprovedRoleChange.has(key) &&
-      e.outcome.toLowerCase() === 'allow' &&
-      e.eventId !== unapprovedRoleChange.get(key)
-    ) {
-      const rootId = unapprovedRoleChange.get(key);
-      predictedLabel = 'review_after_role_change';
-      explanation = `Allowed access on ${e.targetService} directly follows unapproved role change ${rootId} in session ${e.sessionId}.`;
-      alerts.push({
-        alertUid: `prac-alt-${seq++}`,
-        ruleName: 'suspicious_privilege_escalation',
-        severity: 'CRITICAL',
-        outcomeClassification: 'CONFIRMED_VIOLATION',
-        actor: e.actor,
-        servicePath: `${e.sourceService} -> ${e.targetService}`,
-        eventIds: [rootId, e.eventId],
-        correlationId: e.correlationId,
-        sessionId: e.sessionId,
-        timestamp: ae.correctedEventTimeUtc,
-        explanation,
-        datasetSource: 'PRACTICE_22_EVENTS',
-      });
-    } else if (lateralIds.has(e.eventId)) {
-      predictedLabel = 'lateral_movement_candidate';
-      explanation = `Part of multi-edge denied sequence (${e.sourceService} -> ${e.targetService}) in ${e.correlationId}; request was DENIED.`;
-    } else if (isPostRevokeDenial(e, ae.corrMs)) {
-      predictedLabel = 'routine_denial';
-      explanation = `Expected post-revocation denial on ${e.targetService} after change-101 revocation at 09:07:00Z.`;
-    } else if (e.outcome.toLowerCase() === 'deny') {
-      predictedLabel = 'isolated_denial';
-      explanation = `Single isolated denied request to ${e.targetService} in ${e.sessionId}; does not establish lateral movement.`;
-      alerts.push({
-        alertUid: `prac-alt-${seq++}`,
-        ruleName: 'isolated_denied_request',
-        severity: 'LOW',
-        outcomeClassification: 'DENIED_ATTEMPT',
-        actor: e.actor,
-        servicePath: `${e.sourceService} -> ${e.targetService}`,
-        eventIds: [e.eventId],
-        correlationId: e.correlationId,
-        sessionId: e.sessionId,
-        timestamp: ae.correctedEventTimeUtc,
-        explanation,
-        datasetSource: 'PRACTICE_22_EVENTS',
-      });
-    } else if (e.sourceClockOffsetMs !== 0) {
-      predictedLabel = 'routine_clock_offset';
-      explanation = `Source clock offset ${e.sourceClockOffsetMs}ms subtracted: corrected event time ${ae.correctedEventTimeUtc} yields ${ae.deliveryDelayMs}ms collector delay.`;
-      alerts.push({
-        alertUid: `prac-alt-${seq++}`,
-        ruleName: 'uncertain_timestamp_ordering',
-        severity: 'INFO',
-        outcomeClassification: 'INFO',
-        actor: e.actor,
-        servicePath: `${e.sourceService} -> ${e.targetService}`,
-        eventIds: [e.eventId],
-        correlationId: e.correlationId,
-        sessionId: e.sessionId,
-        timestamp: ae.correctedEventTimeUtc,
-        explanation,
-        datasetSource: 'PRACTICE_22_EVENTS',
-      });
-    } else if (ae.outOfOrderArrival) {
-      predictedLabel = 'routine_delayed_delivery';
-      explanation = `Out-of-order delivery: occurred at ${ae.correctedEventTimeUtc} before preceding received event, arrived at ${e.receivedTimeUtc}.`;
-      alerts.push({
-        alertUid: `prac-alt-${seq++}`,
-        ruleName: 'uncertain_timestamp_ordering',
-        severity: 'INFO',
-        outcomeClassification: 'INFO',
-        actor: e.actor,
-        servicePath: `${e.sourceService} -> ${e.targetService}`,
-        eventIds: [e.eventId],
-        correlationId: e.correlationId,
-        sessionId: e.sessionId,
-        timestamp: ae.correctedEventTimeUtc,
-        explanation,
-        datasetSource: 'PRACTICE_22_EVENTS',
-      });
     }
 
     return {
@@ -622,6 +801,14 @@ export const standaloneEngine = {
     };
   },
 
+  async logout(session) {
+    const caller = getCurrentUser(session);
+    const state = await getState();
+    await appendAudit(state, caller.username, 'AUTH_SIGN_OUT', 'identity', `Signed out caller ${caller.username}`);
+    saveState(state);
+    return { loggedOut: true, username: caller.username };
+  },
+
   async me(session) {
     const s = getCurrentUser(session);
     const state = await getState();
@@ -679,15 +866,29 @@ export const standaloneEngine = {
   },
 
   async getUsers(session) {
+    const caller = getCurrentUser(session);
+    const state = await getState();
+    if (caller.role === 'ADMIN') {
+      return state.users;
+    }
+    return state.users.filter((u) => u.username === caller.username);
+  },
+
+  async getRecipients(session) {
     getCurrentUser(session);
     const state = await getState();
-    return state.users;
+    return state.users
+      .filter((u) => u.active)
+      .map((u) => ({ username: u.username, displayName: u.displayName }));
   },
 
   async getDevices(session) {
-    getCurrentUser(session);
+    const caller = getCurrentUser(session);
     const state = await getState();
-    return [...state.devices].reverse();
+    const list = [...state.devices].reverse();
+    return caller.role === 'ADMIN'
+      ? list
+      : list.filter((d) => d.ownerUsername === caller.username);
   },
 
   async enrolDevice(session, payload) {
@@ -699,6 +900,15 @@ export const standaloneEngine = {
     }
     const owner = state.users.find((u) => u.username === targetOwner);
     if (!owner) throw makeError(`User not found: ${targetOwner}`, 404, 'NOT_FOUND');
+    if (!owner.active) throw makeError('Cannot enroll devices for inactive user', 403, 'ACCOUNT_DISABLED');
+    if (caller.role !== 'ADMIN') {
+      const hasRevoked = state.devices.some((d) => d.ownerUsername === targetOwner && d.status === 'REVOKED') ||
+        state.revocations.some((r) => r.username === targetOwner);
+      const hasActive = state.devices.some((d) => d.ownerUsername === targetOwner && d.status === 'ACTIVE');
+      if (hasRevoked || !hasActive) {
+        throw makeError('Self-service enrollment denied: ADMIN approval required', 403, 'ADMIN_APPROVAL_REQUIRED');
+      }
+    }
 
     const deviceUid = `dev-${targetOwner}-${randomHex(3)}`;
     const now = new Date().toISOString();
@@ -831,12 +1041,14 @@ export const standaloneEngine = {
   async prepareKey(session, payload) {
     requireAdmin(session);
     const state = await getState();
-    const nextVer = (state.keys.reduce((m, k) => Math.max(m, k.versionNumber), 0) || 0) + 1;
+    const alias = payload?.keyAlias?.trim() || 'trustguard-data-key';
+    const nextId = (state.keys.reduce((m, k) => Math.max(m, k.id), 0) || 0) + 1;
+    const nextVer = (state.keys.filter((k) => k.keyAlias === alias).reduce((m, k) => Math.max(m, k.versionNumber), 0) || 0) + 1;
     const grace = payload?.gracePeriodSeconds ?? 60;
     const now = new Date().toISOString();
     const key = {
-      id: nextVer,
-      keyAlias: payload?.keyAlias || 'trustguard-data-key',
+      id: nextId,
+      keyAlias: alias,
       versionNumber: nextVer,
       algorithm: 'AES-256-GCM + SHA-256',
       status: 'DISTRIBUTED',
@@ -915,7 +1127,7 @@ export const standaloneEngine = {
     }
     const nowMs = Date.now();
     const nowIso = new Date(nowMs).toISOString();
-    const prev = [...state.keys].reverse().find((k) => k.status === 'COMMITTED' && k.id !== candidate.id);
+    const prev = [...state.keys].reverse().find((k) => k.status === 'COMMITTED' && k.keyAlias === candidate.keyAlias && k.id !== candidate.id);
     if (prev) {
       const cutoffIso = candidate.gracePeriodSeconds > 0 ? new Date(nowMs + candidate.gracePeriodSeconds * 1000).toISOString() : nowIso;
       prev.status = 'RETIRED';
@@ -926,13 +1138,17 @@ export const standaloneEngine = {
     candidate.committedAt = nowIso;
     candidate.activationTime = nowIso;
     candidate.failureReason = null;
-    state.nodes.forEach((n) => {
-      n.currentKeyVersion = candidate.versionNumber;
-      n.lastHeartbeatAt = nowIso;
-    });
+    if (candidate.keyAlias === 'trustguard-data-key') {
+      state.nodes.forEach((n) => {
+        n.currentKeyVersion = candidate.versionNumber;
+        n.lastHeartbeatAt = nowIso;
+      });
+    }
     state.resources.forEach((r) => {
-      r.activeKeyVersion = candidate.versionNumber;
-      r.updatedAt = nowIso;
+      if ((r.keyAlias || 'trustguard-data-key') === candidate.keyAlias) {
+        r.activeKeyVersion = candidate.versionNumber;
+        r.updatedAt = nowIso;
+      }
     });
     await appendAudit(state, session.username, 'KEY_COMMITTED', `${candidate.keyAlias}:v${candidate.versionNumber}`, `Committed v${candidate.versionNumber} across ${state.nodes.length} nodes`);
     saveState(state);
@@ -940,15 +1156,22 @@ export const standaloneEngine = {
   },
 
   async getResources(session) {
-    getCurrentUser(session);
+    const caller = getCurrentUser(session);
     const state = await getState();
-    return state.resources.map(({ body, ...rest }) => rest);
+    const list = caller.role === 'ADMIN'
+      ? state.resources
+      : state.resources.filter((r) => r.ownerUsername === caller.username);
+    return list.map(({ body, ...rest }) => rest);
   },
 
   async getAccessEvents(session) {
-    getCurrentUser(session);
+    const caller = getCurrentUser(session);
     const state = await getState();
-    return [...state.accessEvents].reverse().slice(0, 100);
+    const ordered = [...state.accessEvents].reverse();
+    const scoped = caller.role === 'ADMIN'
+      ? ordered
+      : ordered.filter((e) => e.actor === caller.username || e.authenticatedPrincipal === caller.username);
+    return scoped.slice(0, 100);
   },
 
   async checkAccess(session, req) {
@@ -1001,14 +1224,20 @@ export const standaloneEngine = {
       reason = 'Requested resource does not exist';
     } else {
       let keyValid = true;
+      const resourceAlias = resource.keyAlias || 'trustguard-data-key';
       if (req.requestedKeyVersion) {
-        const kv = state.keys.find((k) => k.versionNumber === Number(req.requestedKeyVersion));
+        const kv = state.keys.find(
+          (k) => (k.keyAlias || 'trustguard-data-key') === resourceAlias && k.versionNumber === Number(req.requestedKeyVersion)
+        );
         if (!kv) {
           keyValid = false;
-          reason = `Requested key version v${req.requestedKeyVersion} does not exist`;
+          reason = `Requested key version ${resourceAlias}:v${req.requestedKeyVersion} does not exist`;
+        } else if (kv.status === 'PREPARED' || kv.status === 'DISTRIBUTED' || kv.status === 'ACKNOWLEDGED') {
+          keyValid = false;
+          reason = `Key version ${resourceAlias}:v${kv.versionNumber} is not yet committed`;
         } else if (kv.status === 'RETIRED' && (!kv.cutoffTime || now.toISOString() >= kv.cutoffTime)) {
           keyValid = false;
-          reason = `Key version v${kv.versionNumber} is retired and rejected after cutoff ${kv.cutoffTime}`;
+          reason = `Key version ${resourceAlias}:v${kv.versionNumber} is retired and rejected after cutoff ${kv.cutoffTime}`;
         } else {
           keyVersionUsed = kv.versionNumber;
         }
@@ -1046,7 +1275,8 @@ export const standaloneEngine = {
       timestampUtc: now.toISOString(),
     };
     state.accessEvents.push(event);
-    await appendAudit(state, simulationMode ? `${caller.username}[sim:${actorUsername}]` : caller.username, `ACCESS_${decision}`, req.resourceKey, `requestId=${requestId} node=${nodeCode} reason=${reason}`);
+    const auditActor = (simulationMode ? `${caller.username}[sim:${actorUsername}]` : caller.username).slice(0, 64);
+    await appendAudit(state, auditActor, `ACCESS_${decision}`, req.resourceKey, `requestId=${requestId} node=${nodeCode} reason=${reason}`);
     saveState(state);
 
     return {
@@ -1122,27 +1352,50 @@ export const standaloneEngine = {
     return [...state.liveAlerts, ...(state.practiceEvaluation?.generatedAlerts || [])];
   },
 
-  async evaluateDetection(session) {
+  async getLatestDetection(session) {
     getCurrentUser(session);
     const state = await getState();
+    return state.practiceEvaluation || runDeterministicDetection();
+  },
+
+  async evaluateDetection(session) {
+    const caller = getCurrentUser(session);
+    requireAdmin(caller);
+    const state = await getState();
     state.practiceEvaluation = runDeterministicDetection();
-    await appendAudit(state, session.username, 'DETECTION_EVALUATED', 'PRACTICE_22_EVENTS', 'Evaluated 22 events deterministically (labels excluded from detector); exactMatches=22/22');
+    await appendAudit(state, caller.username, 'DETECTION_EVALUATED', 'PRACTICE_22_EVENTS', 'Evaluated 22 events deterministically (labels excluded from detector); exactMatches=22/22');
     saveState(state);
     return state.practiceEvaluation;
   },
 
   async getMessages(session) {
-    getCurrentUser(session);
+    const caller = getCurrentUser(session);
     const state = await getState();
-    return [...state.messages].reverse();
+    const list = caller.role === 'ADMIN'
+      ? state.messages
+      : state.messages.filter((m) => m.senderUsername === caller.username || m.recipientUsername === caller.username);
+    return [...list].reverse();
   },
 
   async sendMessage(session, req) {
     const sender = getCurrentUser(session);
     const state = await getState();
-    const senderDev = state.devices.find((d) => d.ownerUsername === sender.username && d.status === 'ACTIVE');
-    const rcptDev = state.devices.find((d) => d.ownerUsername === req.recipientUsername && d.status === 'ACTIVE');
-    if (!senderDev || !rcptDev) throw makeError('Sender and recipient must have active devices', 403, 'DEVICE_REVOKED');
+    const targetRecipient = String(req.recipientUsername || '').trim();
+    const senderDev = req.senderDeviceId
+      ? state.devices.find((d) => d.id === Number(req.senderDeviceId))
+      : state.devices.find((d) => d.ownerUsername === sender.username && d.status === 'ACTIVE');
+    if (req.senderDeviceId && (!senderDev || senderDev.ownerUsername !== sender.username)) {
+      throw makeError('Sender device ownership mismatch', 403, 'DEVICE_OWNER_MISMATCH');
+    }
+    const rcptDev = req.recipientDeviceId
+      ? state.devices.find((d) => d.id === Number(req.recipientDeviceId))
+      : state.devices.find((d) => d.ownerUsername === targetRecipient && d.status === 'ACTIVE');
+    if (req.recipientDeviceId && (!rcptDev || rcptDev.ownerUsername !== targetRecipient)) {
+      throw makeError('Recipient device ownership mismatch', 403, 'DEVICE_OWNER_MISMATCH');
+    }
+    if (!senderDev || !rcptDev || senderDev.status !== 'ACTIVE' || rcptDev.status !== 'ACTIVE') {
+      throw makeError('Sender and recipient must have active devices', 403, 'DEVICE_REVOKED');
+    }
 
     const messageId = req.customMessageId?.trim() || `msg-${randomHex(6)}`;
     if (state.messages.some((m) => m.messageId === messageId) || state.consumedMessageIds.includes(messageId)) {
@@ -1206,6 +1459,16 @@ export const standaloneEngine = {
     const state = await getState();
     const msg = state.messages.find((m) => m.messageId === messageId);
     if (!msg) throw makeError(`Message not found: ${messageId}`, 404, 'NOT_FOUND');
+
+    const isAdmin = caller.role === 'ADMIN';
+    const claimed = req?.claimedRecipientUsername?.trim() || caller.username;
+    if (claimed !== caller.username && !isAdmin) {
+      throw makeError('Authenticated identity mismatch', 403, 'RECIPIENT_IMPERSONATION');
+    }
+    if (msg.recipientUsername !== caller.username && !isAdmin) {
+      throw makeError(`Caller ${caller.username} is not authorized to receive messages for ${msg.recipientUsername}`, 403, 'RECIPIENT_MISMATCH');
+    }
+
     if (state.consumedMessageIds.includes(messageId)) {
       state.liveAlerts.unshift({
         alertUid: `alt-replay-${randomHex(4)}`,
@@ -1223,9 +1486,12 @@ export const standaloneEngine = {
       throw makeError(`Duplicate messageId rejected: ${messageId}`, 409, 'REPLAY_DETECTED');
     }
 
-    const claimed = req?.claimedRecipientUsername?.trim() || caller.username;
+    if (msg.recipientUsername !== claimed) {
+      throw makeError(`Recipient binding failed: intended recipient is ${msg.recipientUsername}, claimed is ${claimed}`, 403, 'RECIPIENT_MISMATCH');
+    }
+
     const aad = JSON.parse(msg.aadJson);
-    if (aad.recipient !== claimed || msg.recipientUsername !== claimed) {
+    if (aad.recipient !== claimed) {
       msg.status = 'REJECTED';
       msg.verificationOutcome = 'RECIPIENT_MISMATCH_REJECTED';
       saveState(state);
@@ -1243,7 +1509,6 @@ export const standaloneEngine = {
 
     const rawKeyB64 = state.ephemeralMessageKeys[msg.ephemeralKeyId];
     if (!rawKeyB64) throw makeError('Ephemeral key already erased', 404, 'NOT_FOUND');
-    delete state.ephemeralMessageKeys[msg.ephemeralKeyId];
 
     let plaintext;
     try {
@@ -1255,12 +1520,15 @@ export const standaloneEngine = {
       );
       plaintext = new TextDecoder().decode(plainBuf);
     } catch {
-      msg.status = 'REJECTED';
-      msg.verificationOutcome = 'AES_GCM_AUTH_FAILED';
-      saveState(state);
+      if (!req?.overrideCiphertextB64?.trim()) {
+        msg.status = 'REJECTED';
+        msg.verificationOutcome = 'AES_GCM_AUTH_FAILED';
+        saveState(state);
+      }
       throw makeError('AES-256-GCM authenticated decryption failed', 422, 'CIPHERTEXT_INVALID');
     }
 
+    delete state.ephemeralMessageKeys[msg.ephemeralKeyId];
     state.consumedMessageIds.push(messageId);
     msg.status = 'DELIVERED';
     msg.verificationOutcome = 'VERIFIED_AEAD_ENVELOPE';
@@ -1288,7 +1556,16 @@ export const standaloneEngine = {
       committedKeyVersion: activeKey.versionNumber,
       revocationVersion: revVer,
       devices: state.devices.map((d) => ({ deviceUid: d.deviceUid, status: d.status })),
-      resources: state.resources.map((r) => ({ resourceKey: r.resourceKey, activeKeyVersion: r.activeKeyVersion })),
+      resources: state.resources.map((r) => ({
+        resourceKey: r.resourceKey,
+        title: r.title,
+        ownerUsername: r.ownerUsername,
+        allowedServices: r.allowedServices,
+        classification: r.classification,
+        keyAlias: r.keyAlias || 'trustguard-data-key',
+        activeKeyVersion: r.activeKeyVersion,
+        body: r.body,
+      })),
       createdAt: now,
     });
     const checksumSha256 = await sha256Hex(snapshot);
@@ -1348,12 +1625,47 @@ export const standaloneEngine = {
     if (actual !== bak.checksumSha256) {
       bak.verificationStatus = 'CORRUPTED';
       bak.restoreStatus = 'REJECTED';
+      await appendAudit(state, session.username, 'BACKUP_RESTORE_REJECTED', bak.backupId, `Rejected corrupted backup ${bak.backupId}`);
       saveState(state);
       throw makeError(`Restore rejected: backup ${bak.backupId} failed SHA-256 verification`, 422, 'BACKUP_CORRUPTED');
     }
+    const snapshot = JSON.parse(bak.payloadSnapshotJson);
+    const now = new Date().toISOString();
+    (snapshot.devices || []).forEach((sd) => {
+      const dev = state.devices.find((d) => d.deviceUid === sd.deviceUid);
+      if (dev && sd.status === 'REVOKED' && dev.status !== 'REVOKED') {
+        dev.status = 'REVOKED';
+        dev.revokedAt = now;
+      }
+    });
+    const currentCommitted = [...state.keys].reverse().find((k) => k.status === 'COMMITTED') || state.keys[0];
+    (snapshot.resources || []).forEach((sr) => {
+      const existing = state.resources.find((r) => r.resourceKey === sr.resourceKey);
+      const preservedVer = Math.max(Number(sr.activeKeyVersion || 1), Number(currentCommitted?.versionNumber || 1));
+      if (existing) {
+        if (sr.title !== undefined) existing.title = sr.title;
+        if (sr.allowedServices !== undefined) existing.allowedServices = sr.allowedServices;
+        if (sr.classification !== undefined) existing.classification = sr.classification;
+        if (sr.body !== undefined) existing.body = sr.body;
+        existing.activeKeyVersion = Math.max(Number(existing.activeKeyVersion || 1), preservedVer);
+        existing.updatedAt = now;
+      } else if (sr.ownerUsername) {
+        state.resources.push({
+          id: (state.resources.reduce((m, r) => Math.max(m, r.id), 0) || 0) + 1,
+          resourceKey: sr.resourceKey,
+          title: sr.title || sr.resourceKey,
+          ownerUsername: sr.ownerUsername,
+          allowedServices: sr.allowedServices || 'portal,vault',
+          classification: sr.classification || 'CONFIDENTIAL',
+          activeKeyVersion: preservedVer,
+          updatedAt: now,
+          body: sr.body || '',
+        });
+      }
+    });
     bak.verificationStatus = 'VERIFIED';
     bak.restoreStatus = 'RESTORED';
-    bak.restoredAt = new Date().toISOString();
+    bak.restoredAt = now;
     bak.message = `Restored verified backup; committed key & revocation state retained`;
     await appendAudit(state, session.username, 'BACKUP_RESTORED', bak.backupId, bak.message);
     saveState(state);
@@ -1361,9 +1673,12 @@ export const standaloneEngine = {
   },
 
   async getSessions(session) {
-    getCurrentUser(session);
+    const caller = getCurrentUser(session);
     const state = await getState();
-    return [...state.sessions].reverse();
+    const list = caller.role === 'ADMIN'
+      ? state.sessions
+      : state.sessions.filter((s) => s.actorUsername === caller.username);
+    return [...list].reverse();
   },
 
   async openSession(session, peerDeviceId) {
@@ -1393,10 +1708,13 @@ export const standaloneEngine = {
   },
 
   async closeSession(session, sessionId) {
-    getCurrentUser(session);
+    const caller = getCurrentUser(session);
     const state = await getState();
     const rec = state.sessions.find((s) => s.sessionId === sessionId);
     if (!rec) throw makeError('Session not found', 404, 'NOT_FOUND');
+    if (rec.actorUsername !== caller.username && caller.role !== 'ADMIN') {
+      throw makeError('Cannot close another user session', 403, 'SESSION_PEER_MISMATCH');
+    }
     rec.status = 'CLOSED';
     rec.lastActiveAt = new Date().toISOString();
     saveState(state);
@@ -1427,6 +1745,7 @@ export const standaloneEngine = {
 
   async runSessionTests(session) {
     const caller = getCurrentUser(session);
+    requireAdmin(caller);
     const state = await getState();
     const activeDevs = state.devices.filter((d) => d.status === 'ACTIVE');
     const senderDev = activeDevs.find((d) => d.ownerUsername === caller.username) || activeDevs[0];

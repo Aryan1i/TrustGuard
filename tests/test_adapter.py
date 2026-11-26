@@ -6,12 +6,15 @@ import hmac
 import json
 import os
 from pathlib import Path
+import stat
 import subprocess
 import sys
 import tempfile
 import unittest
 
 from pqcrypto.kem import ml_kem_768
+
+import team_app
 
 
 TRUSTGUARD_ROOT = Path(__file__).resolve().parent.parent
@@ -192,6 +195,114 @@ class AdapterIntegrationTests(unittest.TestCase):
             self.assertNotEqual(rc, 0)
             self.assertEqual(out, b"")
             self.assertIn(b"Request failed", err)
+
+    def test_protected_read_replay_rejected_without_overwriting_state_events(self):
+        with tempfile.TemporaryDirectory(prefix="tg-pr-replay-") as state_dir:
+            asset_body = "protected-doc-secret-99881"
+            rc, res, _, _ = self.invoke(
+                state_dir,
+                {
+                    "op": "setup",
+                    "owners": {"doc": "alice"},
+                    "contents": {"doc": asset_body},
+                    "disabled": [],
+                    "key_material": "km-pr-replay",
+                },
+            )
+            self.assertEqual(rc, 0)
+            self.assertEqual(res, {"ready": True})
+
+            pk, sk = ml_kem_768.generate_keypair()
+            pk_b64 = base64.b64encode(pk).decode("ascii")
+            challenge = "chal-replay-check-1"
+            req_id = "pr-unique-001"
+
+            rc, res1, out1, err1 = self.invoke(
+                state_dir,
+                {
+                    "op": "protected_read",
+                    "actor": "alice",
+                    "asset": "doc",
+                    "challenge": challenge,
+                    "public_key": pk_b64,
+                    "request_id": req_id,
+                },
+            )
+            self.assertEqual(rc, 0)
+            self.assertEqual(res1["decision"], "allow")
+            self.assertNotIn(asset_body.encode(), out1 + err1)
+            ss = ml_kem_768.decrypt(sk, base64.b64decode(res1["ciphertext"], validate=True))
+            expected_proof = hmac.new(ss, (challenge + asset_body).encode("utf-8"), hashlib.sha256).hexdigest()
+            self.assertEqual(res1["proof"], expected_proof)
+
+            # Audit entry before replay
+            rc, audit_before, _, _ = self.invoke(state_dir, {"op": "audit", "request_id": req_id})
+            self.assertEqual(rc, 0)
+            self.assertEqual(audit_before["decision"], "allow")
+
+            # Replay exact request_id in protected_read (even with another actor or same actor) must be denied
+            rc, res2, out2, err2 = self.invoke(
+                state_dir,
+                {
+                    "op": "protected_read",
+                    "actor": "bob",
+                    "asset": "doc",
+                    "challenge": challenge,
+                    "public_key": pk_b64,
+                    "request_id": req_id,
+                },
+            )
+            self.assertEqual(rc, 0)
+            self.assertEqual(res2, {"decision": "deny"})
+            self.assertNotIn(asset_body.encode(), out2 + err2)
+
+            # Replay with original owner & same request_id must also deny without overwriting state["events"][req_id]
+            rc, res3, out3, err3 = self.invoke(
+                state_dir,
+                {
+                    "op": "protected_read",
+                    "actor": "alice",
+                    "asset": "doc",
+                    "challenge": challenge,
+                    "public_key": pk_b64,
+                    "request_id": req_id,
+                },
+            )
+            self.assertEqual(rc, 0)
+            self.assertEqual(res3, {"decision": "deny"})
+            self.assertNotIn(asset_body.encode(), out3 + err3)
+
+            rc, audit_after, _, _ = self.invoke(state_dir, {"op": "audit", "request_id": req_id})
+            self.assertEqual(rc, 0)
+            self.assertEqual(audit_after["decision"], "allow")
+            self.assertEqual(audit_after["entry_hash"], audit_before["entry_hash"])
+            self.assertEqual(audit_after["prev_hash"], audit_before["prev_hash"])
+            self.assertTrue(audit_after["chain_verified"])
+
+    def test_state_dir_enforces_0700_and_rejects_symlinks(self):
+        with tempfile.TemporaryDirectory(prefix="tg-dir-hardening-") as tmp:
+            tmp_path = Path(tmp)
+            target_dir = tmp_path / "loose-state"
+            target_dir.mkdir(mode=0o755)
+            os.chmod(target_dir, 0o755)
+
+            old_env = os.environ.get("TRACK4_STATE_DIR")
+            try:
+                os.environ["TRACK4_STATE_DIR"] = str(target_dir)
+                resolved = team_app._state_dir()
+                self.assertEqual(resolved, target_dir)
+                self.assertEqual(stat.S_IMODE(os.lstat(resolved).st_mode), 0o700)
+
+                symlink_dir = tmp_path / "symlink-state"
+                symlink_dir.symlink_to(target_dir)
+                os.environ["TRACK4_STATE_DIR"] = str(symlink_dir)
+                with self.assertRaises(team_app.AdapterError):
+                    team_app._state_dir()
+            finally:
+                if old_env is None:
+                    os.environ.pop("TRACK4_STATE_DIR", None)
+                else:
+                    os.environ["TRACK4_STATE_DIR"] = old_env
 
 
 if __name__ == "__main__":

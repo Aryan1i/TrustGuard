@@ -9,6 +9,7 @@ import java.util.Optional;
 public interface KeyVersionRepository extends JpaRepository<KeyVersionEntity, Long> {
     List<KeyVersionEntity> findAllByOrderByVersionNumberDesc();
     Optional<KeyVersionEntity> findFirstByStatusOrderByVersionNumberDesc(String status);
+    Optional<KeyVersionEntity> findFirstByKeyAliasAndStatusOrderByVersionNumberDesc(String keyAlias, String status);
     Optional<KeyVersionEntity> findByKeyAliasAndVersionNumber(String keyAlias, int versionNumber);
     Optional<KeyVersionEntity> findFirstByKeyAliasOrderByVersionNumberDesc(String keyAlias);
     Optional<KeyVersionEntity> findByVersionNumber(int versionNumber);

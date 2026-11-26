@@ -27,6 +27,11 @@ public class DeviceController {
         return deviceService.listUsers();
     }
 
+    @GetMapping("/users/recipients")
+    public List<Map<String, Object>> listMessagingRecipients() {
+        return deviceService.listMessagingRecipients();
+    }
+
     @GetMapping("/devices")
     public List<DeviceResponse> listDevices() {
         return deviceService.listDevices();

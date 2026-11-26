@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { BrowserRouter, Route, Routes, useLocation } from 'react-router-dom';
-import { clearSession, getSavedSession, resolveRuntimeMode } from './api';
+import { api, clearSession, getSavedSession, resolveRuntimeMode } from './api';
 import Sidebar from './components/Sidebar';
 import Navbar from './components/Navbar';
 import LoginModal from './components/LoginModal';
@@ -60,9 +60,15 @@ function AppShell() {
   }
 
   const title = PAGE_TITLES[location.pathname] || 'TrustGuard';
-  const handleLogout = () => {
-    clearSession();
-    setSession(null);
+  const handleLogout = async () => {
+    try {
+      await api.logout();
+    } catch {
+      // Ignore network/token errors while clearing local session state
+    } finally {
+      clearSession();
+      setSession(null);
+    }
   };
 
   return (
@@ -80,7 +86,7 @@ function AppShell() {
             <Route path="/devices" element={<Devices session={session} />} />
             <Route path="/keys" element={<KeyManagement session={session} />} />
             <Route path="/access" element={<AccessMonitor session={session} />} />
-            <Route path="/threats" element={<ThreatDetection />} />
+            <Route path="/threats" element={<ThreatDetection session={session} />} />
             <Route path="/audit" element={<AuditLogs session={session} />} />
             <Route path="/messaging" element={<Messaging session={session} />} />
             <Route path="/recovery" element={<Recovery session={session} />} />

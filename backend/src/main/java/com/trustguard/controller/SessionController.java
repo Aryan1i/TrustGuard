@@ -2,6 +2,7 @@ package com.trustguard.controller;
 
 import com.trustguard.entity.SessionRecordEntity;
 import com.trustguard.service.SessionService;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.LinkedHashMap;
@@ -39,6 +40,7 @@ public class SessionController {
         return toSummary(sessionService.resumeSession(sessionId));
     }
 
+    @PreAuthorize("hasRole('ADMIN')")
     @PostMapping("/run-tests")
     public List<Map<String, Object>> runSuite() {
         return sessionService.runRepeatableSessionAndDeliverySuite();

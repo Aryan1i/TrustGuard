@@ -6,10 +6,12 @@ import com.trustguard.crypto.ProtectedKeyStore;
 import com.trustguard.util.HashUtil;
 import jakarta.annotation.PostConstruct;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.core.env.Environment;
 import org.springframework.stereotype.Service;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.Map;
 import java.util.Optional;
@@ -17,37 +19,62 @@ import java.util.Optional;
 @Service
 public class JwtService {
 
+    private static final int MIN_HMAC_SECRET_BYTES = 32;
     private static final Base64.Encoder B64_URL_ENC = Base64.getUrlEncoder().withoutPadding();
     private static final Base64.Decoder B64_URL_DEC = Base64.getUrlDecoder();
 
     private final ProtectedKeyStore keyStore;
     private final String configuredSecret;
     private final long expirationSeconds;
+    private final Environment environment;
     private final ObjectMapper mapper = new ObjectMapper();
     private byte[] hmacKey;
 
     public JwtService(
             ProtectedKeyStore keyStore,
+            Environment environment,
             @Value("${trustguard.jwt.secret:}") String configuredSecret,
             @Value("${trustguard.jwt.expiration-seconds:28800}") long expirationSeconds
     ) {
         this.keyStore = keyStore;
+        this.environment = environment;
         this.configuredSecret = configuredSecret;
         this.expirationSeconds = expirationSeconds;
     }
 
     @PostConstruct
     public void init() {
+        if (!isDevOrTestProfile()) {
+            if (configuredSecret == null || configuredSecret.isBlank()
+                    || configuredSecret.getBytes(StandardCharsets.UTF_8).length < MIN_HMAC_SECRET_BYTES) {
+                throw new IllegalStateException(
+                        "TRUSTGUARD_JWT_SECRET (trustguard.jwt.secret) must be configured with at least "
+                                + MIN_HMAC_SECRET_BYTES + " bytes outside local/test profiles"
+                );
+            }
+        }
         this.hmacKey = keyStore.getOrCreateJwtSigningSecret(configuredSecret);
+    }
+
+    private boolean isDevOrTestProfile() {
+        if (environment == null) {
+            return false;
+        }
+        return Arrays.stream(environment.getActiveProfiles())
+                .anyMatch(p -> "local".equalsIgnoreCase(p) || "test".equalsIgnoreCase(p));
     }
 
     public record TokenResult(String token, Instant expiresAt) {
     }
 
-    public record VerifiedClaims(String username, String role, Instant expiresAt) {
+    public record VerifiedClaims(String username, String role, long tokenVersion, Instant expiresAt) {
     }
 
     public TokenResult generateToken(String username, String role) {
+        return generateToken(username, role, 0L);
+    }
+
+    public TokenResult generateToken(String username, String role, long tokenVersion) {
         Instant now = Instant.now();
         Instant exp = now.plusSeconds(expirationSeconds);
         try {
@@ -55,6 +82,7 @@ public class JwtService {
             String payloadJson = mapper.writeValueAsString(Map.of(
                     "sub", username,
                     "role", role,
+                    "tv", tokenVersion,
                     "iat", now.getEpochSecond(),
                     "exp", exp.getEpochSecond()
             ));
@@ -86,14 +114,18 @@ public class JwtService {
             }
             String payloadJson = new String(B64_URL_DEC.decode(parts[1]), StandardCharsets.UTF_8);
             Map<String, Object> claims = mapper.readValue(payloadJson, new TypeReference<>() {});
-            long expEpoch = ((Number) claims.get("exp")).longValue();
-            Instant exp = Instant.ofEpochSecond(expEpoch);
+            Object expObj = claims.get("exp");
+            Object subObj = claims.get("sub");
+            Object tvObj = claims.get("tv");
+            if (!(expObj instanceof Number expNum) || !(subObj instanceof String sub) || sub.isBlank() || !(tvObj instanceof Number tvNum)) {
+                return Optional.empty();
+            }
+            Instant exp = Instant.ofEpochSecond(expNum.longValue());
             if (Instant.now().isAfter(exp)) {
                 return Optional.empty();
             }
-            String sub = String.valueOf(claims.get("sub"));
-            String role = String.valueOf(claims.get("role"));
-            return Optional.of(new VerifiedClaims(sub, role, exp));
+            String role = claims.get("role") != null ? String.valueOf(claims.get("role")) : "";
+            return Optional.of(new VerifiedClaims(sub, role, tvNum.longValue(), exp));
         } catch (Exception e) {
             return Optional.empty();
         }

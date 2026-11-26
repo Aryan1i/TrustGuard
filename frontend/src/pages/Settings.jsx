@@ -28,7 +28,7 @@ export default function Settings({ session, onOpenLogin }) {
 
   useEffect(() => {
     load();
-  }, []);
+  }, [session?.username]);
 
   if (loading && users.length === 0) return <LoadingState />;
 

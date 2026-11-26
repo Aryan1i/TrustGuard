@@ -26,6 +26,9 @@ public class BackupRecordEntity {
     @Column(name = "checksum_sha256", nullable = false, length = 64)
     private String checksumSha256;
 
+    @Column(name = "hmac_sha256", length = 64)
+    private String hmacSha256;
+
     @Column(name = "verification_status", nullable = false, length = 32)
     private String verificationStatus;
 
@@ -60,6 +63,8 @@ public class BackupRecordEntity {
     public void setRevocationVersion(long revocationVersion) { this.revocationVersion = revocationVersion; }
     public String getChecksumSha256() { return checksumSha256; }
     public void setChecksumSha256(String checksumSha256) { this.checksumSha256 = checksumSha256; }
+    public String getHmacSha256() { return hmacSha256; }
+    public void setHmacSha256(String hmacSha256) { this.hmacSha256 = hmacSha256; }
     public String getVerificationStatus() { return verificationStatus; }
     public void setVerificationStatus(String verificationStatus) { this.verificationStatus = verificationStatus; }
     public String getRestoreStatus() { return restoreStatus; }

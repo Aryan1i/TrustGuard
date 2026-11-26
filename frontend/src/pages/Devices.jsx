@@ -42,7 +42,7 @@ export default function Devices({ session }) {
 
   useEffect(() => {
     loadAll();
-  }, []);
+  }, [session?.username]);
 
   const handleEnrol = async (e) => {
     e.preventDefault();

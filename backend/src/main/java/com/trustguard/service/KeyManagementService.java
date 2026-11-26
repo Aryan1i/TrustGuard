@@ -38,6 +38,7 @@ public class KeyManagementService {
     private final PostQuantumCryptoService cryptoService;
     private final ProtectedKeyStore keyStore;
     private final AuditLogService auditLogService;
+    private final SecurityPersistenceService persistenceService;
     private final int defaultGraceSeconds;
 
     public KeyManagementService(
@@ -48,6 +49,7 @@ public class KeyManagementService {
             PostQuantumCryptoService cryptoService,
             ProtectedKeyStore keyStore,
             AuditLogService auditLogService,
+            SecurityPersistenceService persistenceService,
             @Value("${trustguard.demo.default-grace-seconds:60}") int defaultGraceSeconds
     ) {
         this.keyVersionRepository = keyVersionRepository;
@@ -57,7 +59,37 @@ public class KeyManagementService {
         this.cryptoService = cryptoService;
         this.keyStore = keyStore;
         this.auditLogService = auditLogService;
+        this.persistenceService = persistenceService;
         this.defaultGraceSeconds = defaultGraceSeconds;
+    }
+
+    public static String sanitizeAlias(String alias) {
+        String raw = (alias == null || alias.isBlank()) ? DEFAULT_ALIAS : alias.trim();
+        return raw.replaceAll("[^a-zA-Z0-9._-]", "_");
+    }
+
+    public static String dekSecretId(String keyAlias, int versionNumber) {
+        return "key-" + sanitizeAlias(keyAlias) + "-v" + versionNumber + "-dek";
+    }
+
+    public static String kemPrivSecretId(String keyAlias, int versionNumber) {
+        return "key-" + sanitizeAlias(keyAlias) + "-v" + versionNumber + "-mlkem768-priv";
+    }
+
+    public byte[] loadDek(KeyVersionEntity keyVersion) {
+        String scopedId = dekSecretId(keyVersion.getKeyAlias(), keyVersion.getVersionNumber());
+        if (keyStore.contains(scopedId)) {
+            return keyStore.loadSecret(scopedId);
+        }
+        if (DEFAULT_ALIAS.equals(keyVersion.getKeyAlias())) {
+            String legacyId = "key-v" + keyVersion.getVersionNumber() + "-dek";
+            if (keyStore.contains(legacyId)) {
+                return keyStore.loadSecret(legacyId);
+            }
+        }
+        throw new ResourceNotFoundException(
+                "DEK missing in protected keystore for " + keyVersion.getKeyAlias() + ":v" + keyVersion.getVersionNumber()
+        );
     }
 
     public List<KeyVersionResponse> listKeys() {
@@ -68,8 +100,15 @@ public class KeyManagementService {
     }
 
     public KeyVersionEntity getActiveCommittedKey() {
-        return keyVersionRepository.findFirstByStatusOrderByVersionNumberDesc("COMMITTED")
+        return keyVersionRepository.findFirstByKeyAliasAndStatusOrderByVersionNumberDesc(DEFAULT_ALIAS, "COMMITTED")
+                .or(() -> keyVersionRepository.findFirstByStatusOrderByVersionNumberDesc("COMMITTED"))
                 .orElseThrow(() -> new ResourceNotFoundException("No committed active key version found"));
+    }
+
+    public KeyVersionEntity getActiveCommittedKey(String keyAlias) {
+        String alias = (keyAlias == null || keyAlias.isBlank()) ? DEFAULT_ALIAS : keyAlias.trim();
+        return keyVersionRepository.findFirstByKeyAliasAndStatusOrderByVersionNumberDesc(alias, "COMMITTED")
+                .orElseGet(this::getActiveCommittedKey);
     }
 
     public Map<String, Object> getRotationStatus() {
@@ -106,8 +145,8 @@ public class KeyManagementService {
 
         PostQuantumCryptoService.RawKeyPair kemPair = cryptoService.generateMlKem768KeyPair();
         byte[] dek = cryptoService.generateRandomAes256Key();
-        String kemPrivRef = keyStore.storeSecret("key-v" + nextVersion + "-mlkem768-priv", kemPair.privateKey());
-        keyStore.storeSecret("key-v" + nextVersion + "-dek", dek);
+        String kemPrivRef = keyStore.storeSecret(kemPrivSecretId(alias, nextVersion), kemPair.privateKey());
+        keyStore.storeSecret(dekSecretId(alias, nextVersion), dek);
         cryptoService.zeroize(kemPair.privateKey(), dek);
 
         Instant now = Instant.now();
@@ -134,7 +173,7 @@ public class KeyManagementService {
             ack.setKeyVersion(key);
             ack.setNode(node);
             ack.setAckStatus("PENDING");
-            ack.setDetailMessage("Key v" + nextVersion + " distributed; awaiting node verification");
+            ack.setDetailMessage("Key " + alias + " v" + nextVersion + " distributed; awaiting node verification");
             ackRepository.save(ack);
         }
 
@@ -143,7 +182,7 @@ public class KeyManagementService {
                 actor,
                 "KEY_PREPARED_AND_DISTRIBUTED",
                 alias + ":v" + nextVersion,
-                "Prepared ML-KEM-768 key v" + nextVersion + " (grace=" + grace + "s) and distributed to " + nodes.size() + " nodes"
+                "Prepared ML-KEM-768 key " + alias + ":v" + nextVersion + " (grace=" + grace + "s) and distributed to " + nodes.size() + " nodes"
         );
         return toDto(key);
     }
@@ -207,14 +246,13 @@ public class KeyManagementService {
         return toDto(key);
     }
 
-    @Transactional
     public KeyVersionResponse commitKey(Long keyId) {
-        KeyVersionEntity candidate = keyVersionRepository.findById(keyId)
+        KeyVersionEntity candidateCheck = keyVersionRepository.findById(keyId)
                 .orElseThrow(() -> new ResourceNotFoundException("Key version not found: " + keyId));
-        if ("COMMITTED".equals(candidate.getStatus())) {
+        if ("COMMITTED".equals(candidateCheck.getStatus())) {
             throw new ConflictException("ALREADY_COMMITTED", "Key version is already committed");
         }
-        if ("RETIRED".equals(candidate.getStatus())) {
+        if ("RETIRED".equals(candidateCheck.getStatus())) {
             throw new ConflictException("KEY_RETIRED", "Cannot commit a retired key version");
         }
 
@@ -226,100 +264,119 @@ public class KeyManagementService {
 
         if (acks.isEmpty() || !unacked.isEmpty()) {
             String msg = "Commit blocked: required simulated nodes have not acknowledged v"
-                    + candidate.getVersionNumber() + ": " + String.join(", ", unacked);
-            candidate.setFailureReason(msg);
-            keyVersionRepository.save(candidate);
+                    + candidateCheck.getVersionNumber() + ": " + String.join(", ", unacked);
+            String actor = currentActorOrSystem();
+            persistenceService.runInRequiresNew(() -> {
+                KeyVersionEntity rejected = keyVersionRepository.findById(keyId).orElse(null);
+                if (rejected != null) {
+                    rejected.setFailureReason(msg.length() <= 255 ? msg : msg.substring(0, 255));
+                    keyVersionRepository.save(rejected);
+                }
+            });
             auditLogService.appendEvent(
-                    currentActorOrSystem(),
+                    actor,
                     "KEY_COMMIT_REJECTED",
-                    candidate.getKeyAlias() + ":v" + candidate.getVersionNumber(),
+                    candidateCheck.getKeyAlias() + ":v" + candidateCheck.getVersionNumber(),
                     msg
             );
             throw new ConflictException("ACK_QUORUM_NOT_MET", msg);
         }
 
-        Instant now = Instant.now();
-        KeyVersionEntity previousActive = keyVersionRepository.findFirstByStatusOrderByVersionNumberDesc("COMMITTED")
-                .orElse(null);
+        return persistenceService.inTransaction(() -> {
+            KeyVersionEntity candidate = keyVersionRepository.findById(keyId)
+                    .orElseThrow(() -> new ResourceNotFoundException("Key version not found: " + keyId));
+            Instant now = Instant.now();
+            KeyVersionEntity previousActive = keyVersionRepository
+                    .findFirstByKeyAliasAndStatusOrderByVersionNumberDesc(candidate.getKeyAlias(), "COMMITTED")
+                    .orElse(null);
 
-        if (previousActive != null && !previousActive.getId().equals(candidate.getId())) {
-            int grace = candidate.getGracePeriodSeconds();
-            Instant cutoff = grace > 0 ? now.plusSeconds(grace) : now;
-            previousActive.setStatus("RETIRED");
-            previousActive.setGraceUntil(cutoff);
-            previousActive.setCutoffTime(cutoff);
-            keyVersionRepository.save(previousActive);
-        }
-
-        candidate.setStatus("COMMITTED");
-        candidate.setCommittedAt(now);
-        candidate.setActivationTime(now);
-        candidate.setFailureReason(null);
-        candidate = keyVersionRepository.save(candidate);
-
-        List<SimulatedNodeEntity> nodes = nodeRepository.findAllByOrderByIdAsc();
-        for (SimulatedNodeEntity node : nodes) {
-            node.setCurrentKeyVersion(candidate.getVersionNumber());
-            node.setLastHeartbeatAt(now);
-            nodeRepository.save(node);
-        }
-
-        // Re-wrap protected resource payloads under the newly committed DEK
-        if (previousActive != null) {
-            byte[] oldDek = keyStore.loadSecret("key-v" + previousActive.getVersionNumber() + "-dek");
-            byte[] newDek = keyStore.loadSecret("key-v" + candidate.getVersionNumber() + "-dek");
-            try {
-                for (ResourceEntity res : resourceRepository.findAll()) {
-                    if (res.getActiveKeyVersion().getId().equals(previousActive.getId())) {
-                        String plaintext = cryptoService.decryptAes256Gcm(
-                                oldDek,
-                                res.getContentIvB64(),
-                                res.getContentCiphertextB64(),
-                                res.getContentAad()
-                        );
-                        PostQuantumCryptoService.AesGcmPayload rewrapped = cryptoService.encryptAes256Gcm(
-                                newDek,
-                                plaintext,
-                                res.getContentAad()
-                        );
-                        res.setContentIvB64(rewrapped.ivB64());
-                        res.setContentCiphertextB64(rewrapped.ciphertextB64());
-                        res.setActiveKeyVersion(candidate);
-                        res.setUpdatedAt(now);
-                        resourceRepository.save(res);
-                    }
-                }
-            } finally {
-                cryptoService.zeroize(oldDek, newDek);
+            if (previousActive != null && !previousActive.getId().equals(candidate.getId())) {
+                int grace = candidate.getGracePeriodSeconds();
+                Instant cutoff = grace > 0 ? now.plusSeconds(grace) : now;
+                previousActive.setStatus("RETIRED");
+                previousActive.setGraceUntil(cutoff);
+                previousActive.setCutoffTime(cutoff);
+                keyVersionRepository.save(previousActive);
             }
-        }
 
-        auditLogService.appendEvent(
-                currentActorOrSystem(),
-                "KEY_COMMITTED",
-                candidate.getKeyAlias() + ":v" + candidate.getVersionNumber(),
-                "Committed key v" + candidate.getVersionNumber() + " across " + nodes.size() + " nodes; "
-                        + (previousActive != null ? "v" + previousActive.getVersionNumber() + " cutoff at " + previousActive.getCutoffTime() : "initial commit")
-        );
+            candidate.setStatus("COMMITTED");
+            candidate.setCommittedAt(now);
+            candidate.setActivationTime(now);
+            candidate.setFailureReason(null);
+            candidate = keyVersionRepository.save(candidate);
 
-        return toDto(candidate);
+            List<SimulatedNodeEntity> nodes = nodeRepository.findAllByOrderByIdAsc();
+            if (DEFAULT_ALIAS.equals(candidate.getKeyAlias())) {
+                for (SimulatedNodeEntity node : nodes) {
+                    node.setCurrentKeyVersion(candidate.getVersionNumber());
+                    node.setLastHeartbeatAt(now);
+                    nodeRepository.save(node);
+                }
+            }
+
+            // Re-wrap protected resource payloads under the newly committed DEK for this alias
+            if (previousActive != null) {
+                byte[] oldDek = loadDek(previousActive);
+                byte[] newDek = loadDek(candidate);
+                try {
+                    for (ResourceEntity res : resourceRepository.findAll()) {
+                        if (res.getActiveKeyVersion().getId().equals(previousActive.getId())) {
+                            String plaintext = cryptoService.decryptAes256Gcm(
+                                    oldDek,
+                                    res.getContentIvB64(),
+                                    res.getContentCiphertextB64(),
+                                    res.getContentAad()
+                            );
+                            PostQuantumCryptoService.AesGcmPayload rewrapped = cryptoService.encryptAes256Gcm(
+                                    newDek,
+                                    plaintext,
+                                    res.getContentAad()
+                            );
+                            res.setContentIvB64(rewrapped.ivB64());
+                            res.setContentCiphertextB64(rewrapped.ciphertextB64());
+                            res.setActiveKeyVersion(candidate);
+                            res.setUpdatedAt(now);
+                            resourceRepository.save(res);
+                        }
+                    }
+                } finally {
+                    cryptoService.zeroize(oldDek, newDek);
+                }
+            }
+
+            auditLogService.appendEvent(
+                    currentActorOrSystem(),
+                    "KEY_COMMITTED",
+                    candidate.getKeyAlias() + ":v" + candidate.getVersionNumber(),
+                    "Committed key " + candidate.getKeyAlias() + ":v" + candidate.getVersionNumber()
+                            + " across " + nodes.size() + " nodes; "
+                            + (previousActive != null ? "v" + previousActive.getVersionNumber() + " cutoff at " + previousActive.getCutoffTime() : "initial commit")
+            );
+
+            return toDto(candidate);
+        });
     }
 
     public KeyVersionEntity validateKeyUsage(Integer requestedVersion, Instant evaluationTime) {
-        KeyVersionEntity active = getActiveCommittedKey();
-        if (requestedVersion == null || requestedVersion == active.getVersionNumber()) {
+        return validateKeyUsage(DEFAULT_ALIAS, requestedVersion, evaluationTime);
+    }
+
+    public KeyVersionEntity validateKeyUsage(String keyAlias, Integer requestedVersion, Instant evaluationTime) {
+        String alias = (keyAlias == null || keyAlias.isBlank()) ? DEFAULT_ALIAS : keyAlias.trim();
+        KeyVersionEntity active = getActiveCommittedKey(alias);
+        if (requestedVersion == null || (requestedVersion == active.getVersionNumber() && alias.equals(active.getKeyAlias()))) {
             return active;
         }
-        KeyVersionEntity requested = keyVersionRepository.findByVersionNumber(requestedVersion)
+        KeyVersionEntity requested = keyVersionRepository.findByKeyAliasAndVersionNumber(alias, requestedVersion)
                 .orElseThrow(() -> new AccessDeniedBusinessException(
                         "UNKNOWN_KEY_VERSION",
-                        "Requested key version v" + requestedVersion + " does not exist"
+                        "Requested key version " + alias + ":v" + requestedVersion + " does not exist"
                 ));
         if ("PREPARED".equals(requested.getStatus()) || "DISTRIBUTED".equals(requested.getStatus())
                 || "ACKNOWLEDGED".equals(requested.getStatus())) {
             throw new AccessDeniedBusinessException(
                     "UNCOMMITTED_KEY_VERSION",
-                    "Key version v" + requestedVersion + " is not yet committed for operational use"
+                    "Key version " + alias + ":v" + requestedVersion + " is not yet committed for operational use"
             );
         }
         if ("RETIRED".equals(requested.getStatus())) {
@@ -327,7 +384,7 @@ public class KeyManagementService {
             if (cutoff == null || !evaluationTime.isBefore(cutoff)) {
                 throw new AccessDeniedBusinessException(
                         "KEY_PAST_CUTOFF",
-                        "Key version v" + requestedVersion + " is retired and rejected after cutoff " + cutoff
+                        "Key version " + alias + ":v" + requestedVersion + " is retired and rejected after cutoff " + cutoff
                 );
             }
         }

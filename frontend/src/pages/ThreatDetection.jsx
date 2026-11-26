@@ -8,9 +8,10 @@ import StatusBadge, { DotStatus } from '../components/StatusBadge';
 import LoadingState from '../components/LoadingState';
 import { formatUtcIso } from '../dateUtils';
 
-export default function ThreatDetection() {
+export default function ThreatDetection({ session }) {
   const location = useLocation();
   const urlQuery = useMemo(() => new URLSearchParams(location.search).get('q') || '', [location.search]);
+  const isAdmin = session?.role === 'ADMIN';
 
   const [evaluation, setEvaluation] = useState(null);
   const [alerts, setAlerts] = useState([]);
@@ -23,6 +24,19 @@ export default function ThreatDetection() {
   useEffect(() => {
     setAlertQuery(urlQuery);
   }, [urlQuery]);
+
+  const loadLatest = async () => {
+    setError('');
+    try {
+      const [ev, allAlerts] = await Promise.all([api.getLatestDetection(), api.getAlerts()]);
+      setEvaluation(ev);
+      setAlerts(allAlerts);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const runAndLoad = async () => {
     setRunning(true);
@@ -40,8 +54,8 @@ export default function ThreatDetection() {
   };
 
   useEffect(() => {
-    runAndLoad();
-  }, []);
+    loadLatest();
+  }, [session?.username]);
 
   if (loading && !evaluation) return <LoadingState />;
 
@@ -59,9 +73,13 @@ export default function ThreatDetection() {
     <div>
       <div className="page-subheader">
         <h2 className="page-subheader-title">Threat Detection & Alerts</h2>
-        <button type="button" className="btn btn-primary" disabled={running} onClick={runAndLoad}>
-          {running ? 'Evaluating...' : 'Re-run Evaluation'}
-        </button>
+        {isAdmin ? (
+          <button type="button" className="btn btn-primary" disabled={running} onClick={runAndLoad}>
+            {running ? 'Evaluating...' : 'Re-run Evaluation'}
+          </button>
+        ) : (
+          <StatusBadge value="ADMIN ONLY EVAL" />
+        )}
       </div>
 
       {error && <div className="banner banner-danger">{error}</div>}

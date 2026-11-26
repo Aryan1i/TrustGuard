@@ -26,7 +26,13 @@ trustguard:
     secret: ${TRUSTGUARD_JWT_SECRET:}
     expiration-seconds: 28800
   cors:
-    allowed-origins: ${TRUSTGUARD_CORS_ORIGINS:http://localhost:5173,http://127.0.0.1:5173,https://*.vercel.app}
+    allowed-origins: ${TRUSTGUARD_CORS_ORIGINS:http://localhost:5173,http://127.0.0.1:5173,https://trust-guard-mocha.vercel.app}
+  auth:
+    rate-limit:
+      max-failures-per-username: 5
+      max-failures-per-ip: 25
+      window-seconds: 300
+      lockout-seconds: 300
   demo:
-    seed-enabled: true
+    seed-enabled: ${TRUSTGUARD_DEMO_SEED_ENABLED:true}
     default-grace-seconds: 60

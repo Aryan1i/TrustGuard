@@ -117,10 +117,26 @@ public class DetectionOrchestrationService {
     }
 
     public DetectionEvaluationResponse getLatestPracticeEvaluation() {
-        if (lastPracticeRun == null) {
-            return evaluatePracticeDataset();
+        DetectionEvaluationResponse cached = lastPracticeRun;
+        if (cached != null) {
+            return cached;
         }
-        return lastPracticeRun;
+        List<PracticeEvent> events = datasetLoader.loadEvents();
+        List<ApprovalChange> approvals = datasetLoader.loadApprovals();
+        EngineOutput output = engine.evaluatePracticeEvents(events, approvals);
+        List<ExpectedLabel> labels = datasetLoader.loadLabelsOnlyForPostEvaluation();
+        EvaluationMetricsDto metrics = evaluator.evaluateAgainstLabels(output.classifiedEvents(), labels);
+        DetectionEvaluationResponse snapshot = new DetectionEvaluationResponse(
+                PRACTICE_SOURCE,
+                events.size(),
+                false,
+                output.classifiedEvents(),
+                output.alerts(),
+                metrics,
+                PRACTICE_LIMITATION
+        );
+        this.lastPracticeRun = snapshot;
+        return snapshot;
     }
 
     public List<AlertDto> listAllAlerts() {

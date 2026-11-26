@@ -9,4 +9,5 @@ import java.util.Optional;
 public interface RevocationRepository extends JpaRepository<RevocationEntity, Long> {
     Optional<RevocationEntity> findTopByOrderByRevocationVersionDesc();
     List<RevocationEntity> findAllByOrderByRevocationVersionDesc();
+    boolean existsByUsername(String username);
 }

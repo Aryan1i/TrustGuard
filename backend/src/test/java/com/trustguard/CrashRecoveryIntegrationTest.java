@@ -33,6 +33,7 @@ class CrashRecoveryIntegrationTest {
         String keystorePath = tempDir.resolve("crash-ks.json").toAbsolutePath().toString();
 
         String[] commonArgs = new String[]{
+                "--spring.profiles.active=local",
                 "--server.port=0",
                 "--spring.datasource.url=" + dbUrl,
                 "--spring.datasource.driver-class-name=org.h2.Driver",
@@ -70,6 +71,9 @@ class CrashRecoveryIntegrationTest {
 
         // Phase 2: Restart fresh application context against same persisted DB & keystore
         try (ConfigurableApplicationContext ctx2 = SpringApplication.run(TrustGuardApplication.class, commonArgs)) {
+            SecurityContextHolder.getContext().setAuthentication(
+                    new UsernamePasswordAuthenticationToken("admin", null, List.of(new SimpleGrantedAuthority("ROLE_ADMIN")))
+            );
             KeyManagementService keyService = ctx2.getBean(KeyManagementService.class);
             DeviceService deviceService = ctx2.getBean(DeviceService.class);
 
@@ -81,6 +85,8 @@ class CrashRecoveryIntegrationTest {
                     .findFirst()
                     .orElseThrow();
             assertEquals("REVOKED", reloaded.status());
+        } finally {
+            SecurityContextHolder.clearContext();
         }
     }
 }

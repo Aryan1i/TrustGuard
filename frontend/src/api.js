@@ -120,9 +120,22 @@ export const api = {
     }
     return standaloneEngine.login(username, password);
   },
+  logout: async () => {
+    const session = getSavedSession();
+    if (!session) return { loggedOut: true };
+    if (session.token?.startsWith('tg-standalone.')) {
+      return standaloneEngine.logout(session);
+    }
+    const mode = await resolveRuntimeMode();
+    if (mode === 'backend') {
+      return apiClient.post('/auth/logout').then((r) => r.data);
+    }
+    return standaloneEngine.logout(session);
+  },
   me: () => dispatch(() => apiClient.get('/auth/me').then((r) => r.data), (s) => standaloneEngine.me(s)),
   getDashboard: () => dispatch(() => apiClient.get('/dashboard').then((r) => r.data), (s) => standaloneEngine.getDashboard(s)),
   getUsers: () => dispatch(() => apiClient.get('/users').then((r) => r.data), (s) => standaloneEngine.getUsers(s)),
+  getRecipients: () => dispatch(() => apiClient.get('/users/recipients').then((r) => r.data), (s) => standaloneEngine.getRecipients(s)),
   getDevices: () => dispatch(() => apiClient.get('/devices').then((r) => r.data), (s) => standaloneEngine.getDevices(s)),
   enrolDevice: (payload) =>
     dispatch(() => apiClient.post('/devices/enrol', payload).then((r) => r.data), (s) => standaloneEngine.enrolDevice(s, payload)),
@@ -161,6 +174,8 @@ export const api = {
   revertAuditTamper: () =>
     dispatch(() => apiClient.post('/audit/revert-tamper').then((r) => r.data), (s) => standaloneEngine.revertAuditTamper(s)),
   getAlerts: () => dispatch(() => apiClient.get('/alerts').then((r) => r.data), (s) => standaloneEngine.getAlerts(s)),
+  getLatestDetection: () =>
+    dispatch(() => apiClient.get('/detection/latest').then((r) => r.data), (s) => standaloneEngine.getLatestDetection(s)),
   evaluateDetection: () =>
     dispatch(() => apiClient.post('/detection/evaluate').then((r) => r.data), (s) => standaloneEngine.evaluateDetection(s)),
   getSecurityMetrics: () =>

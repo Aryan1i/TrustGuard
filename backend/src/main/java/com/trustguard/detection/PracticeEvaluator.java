@@ -22,7 +22,9 @@ public class PracticeEvaluator {
             "unexpected_role_change",
             "review_after_role_change",
             "lateral_movement_candidate",
-            "isolated_denial"
+            "isolated_denial",
+            "unexpected_service_access",
+            "suspicious_clock_offset"
     );
 
     public EvaluationMetricsDto evaluateAgainstLabels(

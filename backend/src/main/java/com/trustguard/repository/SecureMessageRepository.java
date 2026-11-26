@@ -9,4 +9,5 @@ import java.util.Optional;
 public interface SecureMessageRepository extends JpaRepository<SecureMessageEntity, Long> {
     Optional<SecureMessageEntity> findByMessageId(String messageId);
     List<SecureMessageEntity> findAllByOrderByCreatedAtDesc();
+    List<SecureMessageEntity> findBySenderUsernameOrRecipientUsernameOrderByCreatedAtDesc(String senderUsername, String recipientUsername);
 }

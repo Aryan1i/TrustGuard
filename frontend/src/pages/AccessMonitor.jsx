@@ -40,6 +40,12 @@ export default function AccessMonitor({ session }) {
       setResources(res);
       setDevices(dev);
       setNodes(nd);
+      if (res.length > 0 && !res.some((r) => r.resourceKey === resourceKey)) {
+        setResourceKey(res[0].resourceKey);
+      }
+      if (dev.length > 0 && deviceId && !dev.some((d) => String(d.id) === String(deviceId))) {
+        setDeviceId('');
+      }
     } catch (err) {
       setError(err.message);
     } finally {
@@ -49,7 +55,7 @@ export default function AccessMonitor({ session }) {
 
   useEffect(() => {
     load();
-  }, []);
+  }, [session?.username]);
 
   const runSimulation = async (overrides = {}) => {
     setSubmitting(true);

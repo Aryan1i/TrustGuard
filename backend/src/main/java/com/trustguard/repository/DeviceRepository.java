@@ -11,5 +11,6 @@ public interface DeviceRepository extends JpaRepository<DeviceEntity, Long> {
     List<DeviceEntity> findByOwnerUsernameOrderByEnrolledAtDesc(String username);
     List<DeviceEntity> findAllByOrderByEnrolledAtDesc();
     long countByStatus(String status);
+    boolean existsByOwnerUsernameAndStatus(String username, String status);
     Optional<DeviceEntity> findFirstByOwnerUsernameAndStatusOrderByEnrolledAtDesc(String username, String status);
 }
