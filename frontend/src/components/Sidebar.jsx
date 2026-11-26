@@ -4,12 +4,12 @@ import { NavLink } from 'react-router-dom';
 export const MODULES = [
   { to: '/', label: 'Dashboard', group: 'Main menu' },
   { to: '/devices', label: 'Devices', group: 'Main menu' },
-  { to: '/keys', label: 'Key Management', group: 'Main menu' },
+  { to: '/keys', label: 'Key Management', group: 'Main menu', adminOnly: true },
   { to: '/access', label: 'Access Monitor', group: 'Main menu' },
   { to: '/threats', label: 'Threat Detection', group: 'Main menu' },
   { to: '/audit', label: 'Audit Logs', group: 'Security' },
   { to: '/messaging', label: 'Secure Messaging', group: 'Security' },
-  { to: '/recovery', label: 'Backup & Recovery', group: 'Security' },
+  { to: '/recovery', label: 'Backup & Recovery', group: 'Security', adminOnly: true },
   { to: '/settings', label: 'Settings', group: 'Admin' },
 ];
 
@@ -49,22 +49,28 @@ export default function Sidebar({ session, onOpenLogin, onLogout }) {
       </div>
 
       <nav className="sidebar-nav">
-        {groups.map((group) => (
-          <div key={group}>
-            <div className="sidebar-section-label">{group}</div>
-            {MODULES.filter((m) => m.group === group).map((m) => (
-              <NavLink
-                key={m.to}
-                to={m.to}
-                end={m.to === '/'}
-                className={({ isActive }) => `sidebar-link${isActive ? ' active' : ''}`}
-              >
-                <MenuIcon path={m.to} />
-                <span>{m.label}</span>
-              </NavLink>
-            ))}
-          </div>
-        ))}
+        {groups.map((group) => {
+          const items = MODULES.filter(
+            (m) => m.group === group && (!m.adminOnly || session?.role === 'ADMIN')
+          );
+          if (items.length === 0) return null;
+          return (
+            <div key={group}>
+              <div className="sidebar-section-label">{group}</div>
+              {items.map((m) => (
+                <NavLink
+                  key={m.to}
+                  to={m.to}
+                  end={m.to === '/'}
+                  className={({ isActive }) => `sidebar-link${isActive ? ' active' : ''}`}
+                >
+                  <MenuIcon path={m.to} />
+                  <span>{m.label}</span>
+                </NavLink>
+              ))}
+            </div>
+          );
+        })}
       </nav>
 
       <div className="sidebar-footer">

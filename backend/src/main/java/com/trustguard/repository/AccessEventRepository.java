@@ -13,5 +13,9 @@ public interface AccessEventRepository extends JpaRepository<AccessEventEntity, 
             String actorUsername,
             String authenticatedPrincipal
     );
+    List<AccessEventEntity> findByActorUsernameOrAuthenticatedPrincipal(
+            String actorUsername,
+            String authenticatedPrincipal
+    );
     long countByDecision(String decision);
 }

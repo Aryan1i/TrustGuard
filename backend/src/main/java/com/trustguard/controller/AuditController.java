@@ -23,6 +23,7 @@ public class AuditController {
     }
 
     @PostMapping("/verify")
+    @org.springframework.security.access.prepost.PreAuthorize("hasRole('ADMIN')")
     public AuditVerifyResponse verifyChain() {
         return auditLogService.verifyChain();
     }

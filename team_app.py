@@ -87,6 +87,23 @@ def _require_str(value: Any, field: str) -> str:
     return value
 
 
+def _validate_ml_kem_768_pk(pk_bytes: bytes) -> None:
+    """Enforce NIST FIPS 203 Section 7.2 encapsulation key checks (< q=3329, non-zero)."""
+    if len(pk_bytes) != 1184:
+        raise AdapterError("Invalid ML-KEM-768 public_key size")
+    t_bytes = pk_bytes[:1152]
+    if not any(t_bytes):
+        raise AdapterError("Degenerate all-zero ML-KEM-768 public_key")
+    for idx in range(0, 1152, 3):
+        b0 = t_bytes[idx]
+        b1 = t_bytes[idx + 1]
+        b2 = t_bytes[idx + 2]
+        d1 = b0 | ((b1 & 0x0F) << 8)
+        d2 = (b1 >> 4) | (b2 << 4)
+        if d1 >= 3329 or d2 >= 3329:
+            raise AdapterError("Invalid ML-KEM-768 public_key modulus check")
+
+
 def _compute_entry_hash(prev_hash: str, record: dict[str, Any]) -> str:
     material = {
         "prev_hash": prev_hash,
@@ -435,6 +452,8 @@ def _handle_protected_read(state_dir: Path, request: dict[str, Any]) -> dict[str
 
     if len(pk_bytes) != ml_kem_768.PUBLIC_KEY_SIZE:
         raise AdapterError("Invalid ML-KEM-768 public_key size")
+
+    _validate_ml_kem_768_pk(pk_bytes)
 
     ciphertext_bytes, shared_secret = ml_kem_768.encrypt(pk_bytes)
     try:

@@ -29,6 +29,7 @@ public class DeterministicDetectionEngine {
     public static final long MAX_PLAUSIBLE_CLOCK_OFFSET_MS = 30_000L;
     public static final long MAX_PLAUSIBLE_OFFSET_DELAY_MS = 30_000L;
     public static final long LATERAL_MOVEMENT_WINDOW_MS = 300_000L;
+    public static final long SLOW_LATERAL_WINDOW_MS = 86_400_000L;
     public static final long POST_REVOCATION_TRANSITION_WINDOW_SECONDS = 60L;
 
     public record EngineOutput(
@@ -56,6 +57,12 @@ public class DeterministicDetectionEngine {
     ) {
     }
 
+    private record RoleRevocation(
+            int orderIndex,
+            Instant policyTime
+    ) {
+    }
+
     public EngineOutput evaluatePracticeEvents(List<PracticeEvent> events, List<ApprovalChange> approvals) {
         // Step 1: Preserve receipt order, validate clock-offset plausibility, and detect out-of-order arrival.
         Map<String, Instant> maxTimeByActorSession = new HashMap<>();
@@ -77,8 +84,9 @@ public class DeterministicDetectionEngine {
             annotated.add(new AnnotatedEvent(idx, evt, corrected, policyTime, delayMs, outOfOrder, implausibleOffset));
         }
 
-        // Step 2: Detect unapproved role changes per actor (so cross-session privilege escalation is caught).
+        // Step 2: Detect unapproved role changes and approved role revocations per actor.
         Map<String, List<RoleEscalation>> unapprovedRoleChangesByActor = new HashMap<>();
+        Map<String, List<RoleRevocation>> approvedRevocationsBySubject = new HashMap<>();
         for (AnnotatedEvent ae : annotated) {
             PracticeEvent e = ae.raw();
             if ("role_change".equals(e.action()) && !e.roleBefore().equals(e.roleAfter())) {
@@ -88,11 +96,17 @@ public class DeterministicDetectionEngine {
                             .computeIfAbsent(e.actor(), k -> new ArrayList<>())
                             .add(new RoleEscalation(ae.orderIndex(), ae.policyTime(), e.eventId(), e.sessionId()));
                 }
+            } else if ("revoke_role".equals(e.action())) {
+                findRevokeApproval(e, approvals).ifPresent(rev ->
+                        approvedRevocationsBySubject
+                                .computeIfAbsent(rev.subject(), k -> new ArrayList<>())
+                                .add(new RoleRevocation(ae.orderIndex(), ae.policyTime()))
+                );
             }
         }
 
         // Step 3: Detect multi-hop unexpected service edges per actor within a bounded time window,
-        // even when correlation_id or session_id rotates between probes.
+        // plus slow-and-low probes across >= 3 distinct target services within a 24h horizon.
         Map<String, List<AnnotatedEvent>> unexpectedEdgesByActor = new LinkedHashMap<>();
         for (AnnotatedEvent ae : annotated) {
             PracticeEvent e = ae.raw();
@@ -101,7 +115,7 @@ public class DeterministicDetectionEngine {
             if (!isDeny && !isAllow) {
                 continue;
             }
-            if (isAllow && findPriorRoleEscalation(e.actor(), ae, unapprovedRoleChangesByActor).isPresent()) {
+            if (isAllow && findPriorRoleEscalation(e.actor(), ae, unapprovedRoleChangesByActor, approvedRevocationsBySubject).isPresent()) {
                 // Handled directly as post-role-change escalation follow-up
                 continue;
             }
@@ -123,50 +137,22 @@ public class DeterministicDetectionEngine {
             List<List<AnnotatedEvent>> clusters = clusterByBoundedWindow(sorted, LATERAL_MOVEMENT_WINDOW_MS);
             for (List<AnnotatedEvent> cluster : clusters) {
                 if (cluster.size() >= 2) {
-                    List<String> ids = cluster.stream().map(a -> a.raw().eventId()).toList();
-                    lateralMovementEventIds.addAll(ids);
-                    String path = buildServicePath(cluster);
-                    PracticeEvent first = cluster.get(0).raw();
-                    boolean hasAllowedHop = cluster.stream()
-                            .anyMatch(a -> "allow".equalsIgnoreCase(a.raw().outcome()));
+                    alerts.add(buildLateralAlert(cluster, alertSeq++, false, lateralMovementEventIds));
+                }
+            }
 
-                    Set<String> sessions = new LinkedHashSet<>();
-                    Set<String> correlations = new LinkedHashSet<>();
-                    for (AnnotatedEvent item : cluster) {
-                        if (item.raw().sessionId() != null && !item.raw().sessionId().isBlank()) {
-                            sessions.add(item.raw().sessionId());
-                        }
-                        if (item.raw().correlationId() != null && !item.raw().correlationId().isBlank()) {
-                            correlations.add(item.raw().correlationId());
-                        }
-                    }
-
-                    String sessionSummary = sessions.size() == 1 ? first.sessionId() : String.join(",", sessions);
-                    String corrSummary = correlations.size() == 1 ? first.correlationId() : String.join(",", correlations);
-
-                    String explanation = hasAllowedHop
-                            ? cluster.size() + " sequential unexpected service edges by " + first.actor()
-                                    + " within " + (LATERAL_MOVEMENT_WINDOW_MS / 1000) + "s window (session "
-                                    + sessionSummary + " / flow " + corrSummary
-                                    + "). Includes unexpected ALLOWED edge(s); classified as confirmed multi-hop violation."
-                            : cluster.size() + " sequential unexpected service edges grouped in session "
-                                    + sessionSummary + " / " + corrSummary
-                                    + ". All requests were DENIED; classified as candidate lateral-movement reconnaissance, NOT successful compromise.";
-
-                    alerts.add(new AlertDto(
-                            "prac-alt-" + (alertSeq++),
-                            "lateral_movement_candidate",
-                            hasAllowedHop ? "CRITICAL" : "HIGH",
-                            hasAllowedHop ? "CONFIRMED_VIOLATION" : "DENIED_ATTEMPT",
-                            first.actor(),
-                            path,
-                            ids,
-                            corrSummary,
-                            sessionSummary,
-                            cluster.get(cluster.size() - 1).correctedTime(),
-                            explanation,
-                            "PRACTICE_22_EVENTS"
-                    ));
+            List<AnnotatedEvent> remaining = sorted.stream()
+                    .filter(ae -> !lateralMovementEventIds.contains(ae.raw().eventId()))
+                    .toList();
+            List<List<AnnotatedEvent>> slowClusters = clusterByBoundedWindow(remaining, SLOW_LATERAL_WINDOW_MS);
+            for (List<AnnotatedEvent> slowCluster : slowClusters) {
+                long distinctTargets = slowCluster.stream()
+                        .map(ae -> ae.raw().targetService())
+                        .filter(s -> s != null && !s.isBlank())
+                        .distinct()
+                        .count();
+                if (distinctTargets >= 3) {
+                    alerts.add(buildLateralAlert(slowCluster, alertSeq++, true, lateralMovementEventIds));
                 }
             }
         }
@@ -285,7 +271,7 @@ public class DeterministicDetectionEngine {
                 }
             } else {
                 Optional<RoleEscalation> priorEscalation = "allow".equalsIgnoreCase(e.outcome())
-                        ? findPriorRoleEscalation(e.actor(), ae, unapprovedRoleChangesByActor)
+                        ? findPriorRoleEscalation(e.actor(), ae, unapprovedRoleChangesByActor, approvedRevocationsBySubject)
                         : Optional.empty();
                 if (priorEscalation.isPresent()) {
                     RoleEscalation root = priorEscalation.get();
@@ -472,7 +458,8 @@ public class DeterministicDetectionEngine {
         if (evt.sourceClockOffsetMs() != 0 && delayMs > MAX_PLAUSIBLE_OFFSET_DELAY_MS) {
             return true;
         }
-        // Prevent smaller offsets from dragging a post-expiration event back into an expired approval window
+        // Prevent smaller positive offsets from dragging post-expiration events back into expired windows,
+        // and reject negative offsets that shift events forward across grant validFromUtc or revoke effectiveAtUtc boundaries.
         if (evt.sourceClockOffsetMs() > 0) {
             for (ApprovalChange a : approvals) {
                 if ("grant_role".equals(a.operation())
@@ -483,19 +470,90 @@ public class DeterministicDetectionEngine {
                     return true;
                 }
             }
+        } else if (evt.sourceClockOffsetMs() < 0) {
+            for (ApprovalChange a : approvals) {
+                if ("grant_role".equals(a.operation())
+                        && a.subject().equals(evt.actor())
+                        && a.validFromUtc() != null
+                        && evt.eventTimeUtc().isBefore(a.validFromUtc())
+                        && !corrected.isBefore(a.validFromUtc())) {
+                    return true;
+                }
+                if ("revoke_role".equals(a.operation())
+                        && a.subject().equals(evt.actor())
+                        && a.effectiveAtUtc() != null
+                        && evt.eventTimeUtc().isBefore(a.effectiveAtUtc())
+                        && !corrected.isBefore(a.effectiveAtUtc())) {
+                    return true;
+                }
+            }
         }
         return false;
+    }
+
+    private AlertDto buildLateralAlert(
+            List<AnnotatedEvent> cluster,
+            int seq,
+            boolean slowHorizon,
+            Set<String> lateralMovementEventIds
+    ) {
+        List<String> ids = cluster.stream().map(a -> a.raw().eventId()).toList();
+        lateralMovementEventIds.addAll(ids);
+        String path = buildServicePath(cluster);
+        PracticeEvent first = cluster.get(0).raw();
+        boolean hasAllowedHop = cluster.stream()
+                .anyMatch(a -> "allow".equalsIgnoreCase(a.raw().outcome()));
+
+        Set<String> sessions = new LinkedHashSet<>();
+        Set<String> correlations = new LinkedHashSet<>();
+        for (AnnotatedEvent item : cluster) {
+            if (item.raw().sessionId() != null && !item.raw().sessionId().isBlank()) {
+                sessions.add(item.raw().sessionId());
+            }
+            if (item.raw().correlationId() != null && !item.raw().correlationId().isBlank()) {
+                correlations.add(item.raw().correlationId());
+            }
+        }
+
+        String sessionSummary = sessions.size() == 1 ? first.sessionId() : String.join(",", sessions);
+        String corrSummary = correlations.size() == 1 ? first.correlationId() : String.join(",", correlations);
+        String windowDesc = slowHorizon ? "24h slow-and-low horizon" : (LATERAL_MOVEMENT_WINDOW_MS / 1000) + "s window";
+
+        String explanation = hasAllowedHop
+                ? cluster.size() + " sequential unexpected service edges by " + first.actor()
+                        + " within " + windowDesc + " (session " + sessionSummary + " / flow " + corrSummary
+                        + "). Includes unexpected ALLOWED edge(s); classified as confirmed multi-hop violation."
+                : cluster.size() + " sequential unexpected service edges grouped in session "
+                        + sessionSummary + " / " + corrSummary + " (" + windowDesc
+                        + "). All requests were DENIED; classified as candidate lateral-movement reconnaissance, NOT successful compromise.";
+
+        return new AlertDto(
+                "prac-alt-" + seq,
+                "lateral_movement_candidate",
+                hasAllowedHop ? "CRITICAL" : "HIGH",
+                hasAllowedHop ? "CONFIRMED_VIOLATION" : "DENIED_ATTEMPT",
+                first.actor(),
+                path,
+                ids,
+                corrSummary,
+                sessionSummary,
+                cluster.get(cluster.size() - 1).correctedTime(),
+                explanation,
+                "PRACTICE_22_EVENTS"
+        );
     }
 
     private Optional<RoleEscalation> findPriorRoleEscalation(
             String actor,
             AnnotatedEvent ae,
-            Map<String, List<RoleEscalation>> byActor
+            Map<String, List<RoleEscalation>> byActor,
+            Map<String, List<RoleRevocation>> revocationsBySubject
     ) {
         List<RoleEscalation> list = byActor.get(actor);
         if (list == null || list.isEmpty()) {
             return Optional.empty();
         }
+        List<RoleRevocation> revocations = revocationsBySubject.getOrDefault(actor, List.of());
         RoleEscalation matched = null;
         for (RoleEscalation rc : list) {
             if (rc.eventId().equals(ae.raw().eventId())) {
@@ -503,7 +561,17 @@ public class DeterministicDetectionEngine {
             }
             boolean chronologicallyAfter = ae.policyTime().isAfter(rc.policyTime())
                     || (!ae.policyTime().isBefore(rc.policyTime()) && ae.orderIndex() > rc.orderIndex());
-            if (chronologicallyAfter) {
+            if (!chronologicallyAfter) {
+                continue;
+            }
+            boolean clearedByRevocation = revocations.stream().anyMatch(rev -> {
+                boolean revAfterRc = rev.policyTime().isAfter(rc.policyTime())
+                        || (!rev.policyTime().isBefore(rc.policyTime()) && rev.orderIndex() > rc.orderIndex());
+                boolean aeAfterRev = ae.policyTime().isAfter(rev.policyTime())
+                        || (!ae.policyTime().isBefore(rev.policyTime()) && ae.orderIndex() > rev.orderIndex());
+                return revAfterRc && aeAfterRev;
+            });
+            if (!clearedByRevocation) {
                 matched = rc;
             }
         }
@@ -608,9 +676,15 @@ public class DeterministicDetectionEngine {
         String src = event.sourceService();
         String dst = event.targetService();
         String role = event.roleAfter();
+        boolean isServiceAccount = event.actor() != null && event.actor().startsWith("svc-");
+        boolean isExpectedPortalRole = "viewer".equals(role)
+                || "report-reader".equals(role)
+                || "operator".equals(role)
+                || "USER".equals(role)
+                || "ADMIN".equals(role);
 
         if ("portal".equals(src) && ("identity".equals(dst) || "catalog".equals(dst))) {
-            return true;
+            return !isServiceAccount && isExpectedPortalRole;
         }
         if ("admin-console".equals(src) && "identity".equals(dst) && "operator".equals(role)) {
             return true;

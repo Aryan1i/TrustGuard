@@ -51,6 +51,7 @@ public class DeviceController {
     }
 
     @GetMapping("/nodes")
+    @PreAuthorize("hasRole('ADMIN')")
     public List<SimulatedNodeEntity> listNodes() {
         return deviceService.listNodes();
     }

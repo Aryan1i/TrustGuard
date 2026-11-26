@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
-import { api, saveSession } from '../api';
+import { api, getRuntimeModeSync, saveSession } from '../api';
+import { getStandaloneDemoPassphrase } from '../standaloneEngine';
 
 const QUICK_ACCOUNTS = [
   { username: 'admin', label: 'Admin (Operator)' },
@@ -8,9 +9,17 @@ const QUICK_ACCOUNTS = [
   { username: 'charlie', label: 'Charlie (Owner)' },
 ];
 
+function resolveDefaultPassphrase() {
+  const configured = import.meta.env.VITE_DEMO_PASSWORD;
+  if (configured && String(configured).trim()) {
+    return String(configured).trim();
+  }
+  return getRuntimeModeSync() === 'standalone' ? getStandaloneDemoPassphrase() : '';
+}
+
 export default function LoginModal({ open, onClose, onAuthenticated, standalone = false }) {
   const [username, setUsername] = useState('admin');
-  const [password, setPassword] = useState('TrustGuard!Demo2026');
+  const [password, setPassword] = useState(() => resolveDefaultPassphrase());
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
@@ -47,8 +56,9 @@ export default function LoginModal({ open, onClose, onAuthenticated, standalone 
       </div>
 
       <div className="banner banner-info" style={{ fontSize: '12px' }}>
-        Sign in to manage devices, key lifecycle, access policies, messaging, and alerts. Default password:{' '}
-        <span className="mono">TrustGuard!Demo2026</span>
+        {getRuntimeModeSync() === 'standalone'
+          ? 'Offline standalone browser mode uses an ephemeral local session passphrase. Click any Quick Sign-In account to inspect.'
+          : 'Sign in with your configured environment passphrase to manage devices, keys, access policies, messaging, and alerts.'}
       </div>
 
       {error && <div className="banner banner-danger">{error}</div>}
@@ -102,9 +112,14 @@ export default function LoginModal({ open, onClose, onAuthenticated, standalone 
               className="btn btn-secondary btn-sm"
               disabled={loading}
               onClick={() => {
+                const resolved = password || resolveDefaultPassphrase();
                 setUsername(u.username);
-                setPassword('TrustGuard!Demo2026');
-                submitLogin(u.username, 'TrustGuard!Demo2026');
+                if (resolved) {
+                  setPassword(resolved);
+                  submitLogin(u.username, resolved);
+                } else {
+                  setError(`Enter the configured password above to sign in as ${u.username}.`);
+                }
               }}
             >
               {u.label}

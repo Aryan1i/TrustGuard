@@ -16,4 +16,5 @@ trustguard:
     path: ./target/test-trustguard-keystore.json
   demo:
     seed-enabled: true
+    password: ${TRUSTGUARD_DEMO_PASSWORD:TgTestOnly#Seed!2026}
     default-grace-seconds: 5

@@ -22,8 +22,8 @@ import com.trustguard.security.SecurityUtils;
 import com.trustguard.service.SecurityPersistenceService;
 import com.trustguard.util.CanonicalJsonUtil;
 import com.trustguard.util.HashUtil;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
@@ -32,9 +32,12 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.locks.ReentrantLock;
 
 @Service
 public class SecureMessagingService {
+
+    private static final int LOCK_STRIPES = 512;
 
     private final SecureMessageRepository messageRepository;
     private final ConsumedMessageRepository consumedRepository;
@@ -44,6 +47,7 @@ public class SecureMessagingService {
     private final AuditLogService auditLogService;
     private final SecurityPersistenceService persistenceService;
     private final ObjectMapper objectMapper;
+    private final ReentrantLock[] messageLocks = new ReentrantLock[LOCK_STRIPES];
 
     public SecureMessagingService(
             SecureMessageRepository messageRepository,
@@ -63,6 +67,9 @@ public class SecureMessagingService {
         this.auditLogService = auditLogService;
         this.persistenceService = persistenceService;
         this.objectMapper = objectMapper;
+        for (int i = 0; i < LOCK_STRIPES; i++) {
+            this.messageLocks[i] = new ReentrantLock();
+        }
     }
 
     public List<SecureMessageResponse> listMessages() {
@@ -78,123 +85,143 @@ public class SecureMessagingService {
                 .toList();
     }
 
-    @Transactional
     public SecureMessageResponse sendMessage(SendMessageRequest req) {
         String senderUsername = SecurityUtils.currentUsername();
         String targetRecipientUsername = req.recipientUsername().trim();
-        DeviceEntity senderDevice = resolveActiveDevice(req.senderDeviceId(), senderUsername, "sender");
-        DeviceEntity recipientDevice = resolveActiveDevice(req.recipientDeviceId(), targetRecipientUsername, "recipient");
-
-        if (!"ACTIVE".equals(senderDevice.getStatus()) || !"ACTIVE".equals(recipientDevice.getStatus())) {
-            throw new AccessDeniedBusinessException(
-                    "DEVICE_REVOKED",
-                    "Cannot establish secure messaging channel with a revoked or inactive device"
-            );
-        }
-
         String messageId = (req.customMessageId() != null && !req.customMessageId().isBlank())
                 ? req.customMessageId().trim()
                 : "msg-" + UUID.randomUUID().toString().substring(0, 12);
 
-        if (messageRepository.findByMessageId(messageId).isPresent() || consumedRepository.existsByMessageId(messageId)) {
-            persistenceService.recordLiveAlertInNewTx(
-                    "alt-replay",
-                    "duplicate_replayed_message_id",
-                    "HIGH",
-                    "DENIED_ATTEMPT",
-                    senderUsername,
-                    "messaging -> send",
-                    messageId,
-                    "Attempted duplicate messageId during send"
-            );
-            auditLogService.appendEvent(
-                    senderUsername,
-                    "SECURE_MESSAGE_REJECTED",
-                    messageId,
-                    "Attempted duplicate messageId during send: " + messageId
-            );
-            throw new ConflictException("DUPLICATE_MESSAGE_ID", "Message ID already exists: " + messageId);
-        }
-
-        Instant createdAt = Instant.now();
-        // Generate fresh one-time ephemeral ML-KEM-768 session keypair for forward secrecy:
-        // ephemeral private key is erased immediately upon receipt/decapsulation (one-time prekey).
-        String ephemeralKeyId = "eph-" + messageId;
-        PostQuantumCryptoService.RawKeyPair ephemeralKem = cryptoService.generateMlKem768KeyPair();
-        String boundRecipient = req.simulateTamperedRecipient()
-                ? "tampered-wrong-recipient"
-                : recipientDevice.getOwner().getUsername();
-
-        Map<String, Object> aadMap = new LinkedHashMap<>();
-        aadMap.put("messageId", messageId);
-        aadMap.put("sender", senderUsername);
-        aadMap.put("senderDeviceUid", senderDevice.getDeviceUid());
-        aadMap.put("recipient", boundRecipient);
-        aadMap.put("recipientDeviceUid", recipientDevice.getDeviceUid());
-        aadMap.put("timestampUtc", createdAt.toString());
-        String aadJson = CanonicalJsonUtil.toCanonicalJson(aadMap);
-
-        PostQuantumCryptoService.KemEncapsulation encap = cryptoService.encapsulateMlKem768(ephemeralKem.publicKey());
-        byte[] aesKey = null;
-        byte[] senderSigningPriv = keyStore.loadSecret(senderDevice.getDeviceUid() + "-dsa-priv");
+        ReentrantLock lock = messageLocks[Math.floorMod(messageId.hashCode(), LOCK_STRIPES)];
+        lock.lock();
         try {
-            byte[] hkdfInfo = ("trustguard-msg-v1|" + messageId + "|" + senderUsername + "|" + boundRecipient)
-                    .getBytes(StandardCharsets.UTF_8);
-            aesKey = cryptoService.hkdfSha256(encap.sharedSecret(), messageId.getBytes(StandardCharsets.UTF_8), hkdfInfo, 32);
-            PostQuantumCryptoService.AesGcmPayload encrypted = cryptoService.encryptAes256Gcm(
-                    aesKey,
-                    req.plaintext(),
-                    aadJson
-            );
-            String kemCtB64 = Base64.getEncoder().encodeToString(encap.ciphertext());
-            String payloadCiphertextB64 = encrypted.ciphertextB64();
-            if (req.simulateTamperedCiphertext()) {
-                byte[] ctBytes = Base64.getDecoder().decode(payloadCiphertextB64);
-                ctBytes[0] = (byte) (ctBytes[0] ^ 0xFF);
-                payloadCiphertextB64 = Base64.getEncoder().encodeToString(ctBytes);
-            }
+            return persistenceService.inTransaction(() -> {
+                DeviceEntity senderDevice = resolveActiveDevice(req.senderDeviceId(), senderUsername, "sender");
+                DeviceEntity recipientDevice = resolveActiveDevice(req.recipientDeviceId(), targetRecipientUsername, "recipient");
 
-            String signatureInput = messageId + "|" + kemCtB64 + "|" + encrypted.ivB64() + "|" + payloadCiphertextB64 + "|" + aadJson;
-            byte[] sigBytes = cryptoService.signMlDsa65(senderSigningPriv, signatureInput.getBytes(StandardCharsets.UTF_8));
+                if (!"ACTIVE".equals(senderDevice.getStatus()) || !"ACTIVE".equals(recipientDevice.getStatus())) {
+                    throw new AccessDeniedBusinessException(
+                            "DEVICE_REVOKED",
+                            "Cannot establish secure messaging channel with a revoked or inactive device"
+                    );
+                }
 
-            SecureMessageEntity entity = new SecureMessageEntity();
-            entity.setMessageId(messageId);
-            entity.setSenderUsername(senderUsername);
-            entity.setSenderDevice(senderDevice);
-            entity.setRecipientUsername(recipientDevice.getOwner().getUsername());
-            entity.setRecipientDevice(recipientDevice);
-            entity.setAlgorithm("ML-KEM-768 + HKDF-SHA-256 + AES-256-GCM");
-            entity.setSignatureAlgorithm("ML-DSA-65");
-            entity.setKemCiphertextB64(kemCtB64);
-            entity.setIvB64(encrypted.ivB64());
-            entity.setCiphertextB64(payloadCiphertextB64);
-            entity.setAadJson(aadJson);
-            entity.setSignatureB64(Base64.getEncoder().encodeToString(sigBytes));
-            entity.setEphemeralKeyId(ephemeralKeyId);
-            entity.setForwardSecrecyErased(true);
-            entity.setStatus("SENT");
-            entity.setVerificationOutcome("PENDING_DELIVERY");
-            entity.setCreatedAt(createdAt);
-            messageRepository.saveAndFlush(entity);
+                if (messageRepository.findByMessageId(messageId).isPresent() || consumedRepository.existsByMessageId(messageId)) {
+                    persistenceService.recordLiveAlertInNewTx(
+                            "alt-replay",
+                            "duplicate_replayed_message_id",
+                            "HIGH",
+                            "DENIED_ATTEMPT",
+                            senderUsername,
+                            "messaging -> send",
+                            messageId,
+                            "Attempted duplicate messageId during send"
+                    );
+                    auditLogService.appendEvent(
+                            senderUsername,
+                            "SECURE_MESSAGE_REJECTED",
+                            messageId,
+                            "Attempted duplicate messageId during send: " + messageId
+                    );
+                    throw new ConflictException("DUPLICATE_MESSAGE_ID", "Message ID already exists: " + messageId);
+                }
 
-            keyStore.storeSecret(ephemeralKeyId + "-priv", ephemeralKem.privateKey());
+                Instant createdAt = Instant.now();
+                String ephemeralKeyId = "eph-" + messageId;
+                PostQuantumCryptoService.RawKeyPair ephemeralKem = cryptoService.generateMlKem768KeyPair();
+                String boundRecipient = req.simulateTamperedRecipient()
+                        ? "tampered-wrong-recipient"
+                        : recipientDevice.getOwner().getUsername();
 
-            auditLogService.appendEvent(
-                    senderUsername,
-                    "SECURE_MESSAGE_SENT",
-                    messageId,
-                    "Encrypted with ephemeral ML-KEM-768 + HKDF-SHA-256 + AES-256-GCM and signed with ML-DSA-65 for "
-                            + recipientDevice.getOwner().getUsername() + " (ephemeral sender secret erased)"
-            );
-            return toDto(entity, null);
+                Map<String, Object> aadMap = new LinkedHashMap<>();
+                aadMap.put("messageId", messageId);
+                aadMap.put("sender", senderUsername);
+                aadMap.put("senderDeviceUid", senderDevice.getDeviceUid());
+                aadMap.put("recipient", boundRecipient);
+                aadMap.put("recipientDeviceUid", recipientDevice.getDeviceUid());
+                aadMap.put("timestampUtc", createdAt.toString());
+                String aadJson = CanonicalJsonUtil.toCanonicalJson(aadMap);
+
+                PostQuantumCryptoService.KemEncapsulation encap = cryptoService.encapsulateMlKem768(ephemeralKem.publicKey());
+                byte[] aesKey = null;
+                byte[] senderSigningPriv = keyStore.loadSecret(senderDevice.getDeviceUid() + "-dsa-priv");
+                try {
+                    byte[] hkdfInfo = ("trustguard-msg-v1|" + messageId + "|" + senderUsername + "|" + boundRecipient)
+                            .getBytes(StandardCharsets.UTF_8);
+                    aesKey = cryptoService.hkdfSha256(encap.sharedSecret(), messageId.getBytes(StandardCharsets.UTF_8), hkdfInfo, 32);
+                    PostQuantumCryptoService.AesGcmPayload encrypted = cryptoService.encryptAes256Gcm(
+                            aesKey,
+                            req.plaintext(),
+                            aadJson
+                    );
+                    String kemCtB64 = Base64.getEncoder().encodeToString(encap.ciphertext());
+                    String payloadCiphertextB64 = encrypted.ciphertextB64();
+                    if (req.simulateTamperedCiphertext()) {
+                        byte[] ctBytes = Base64.getDecoder().decode(payloadCiphertextB64);
+                        ctBytes[0] = (byte) (ctBytes[0] ^ 0xFF);
+                        payloadCiphertextB64 = Base64.getEncoder().encodeToString(ctBytes);
+                    }
+
+                    String signatureInput = messageId + "|" + kemCtB64 + "|" + encrypted.ivB64() + "|" + payloadCiphertextB64 + "|" + aadJson;
+                    byte[] sigBytes = cryptoService.signMlDsa65(senderSigningPriv, signatureInput.getBytes(StandardCharsets.UTF_8));
+
+                    SecureMessageEntity entity = new SecureMessageEntity();
+                    entity.setMessageId(messageId);
+                    entity.setSenderUsername(senderUsername);
+                    entity.setSenderDevice(senderDevice);
+                    entity.setRecipientUsername(recipientDevice.getOwner().getUsername());
+                    entity.setRecipientDevice(recipientDevice);
+                    entity.setAlgorithm("ML-KEM-768 + HKDF-SHA-256 + AES-256-GCM");
+                    entity.setSignatureAlgorithm("ML-DSA-65");
+                    entity.setKemCiphertextB64(kemCtB64);
+                    entity.setIvB64(encrypted.ivB64());
+                    entity.setCiphertextB64(payloadCiphertextB64);
+                    entity.setAadJson(aadJson);
+                    entity.setSignatureB64(Base64.getEncoder().encodeToString(sigBytes));
+                    entity.setEphemeralKeyId(ephemeralKeyId);
+                    entity.setForwardSecrecyErased(true);
+                    entity.setStatus("SENT");
+                    entity.setVerificationOutcome("PENDING_DELIVERY");
+                    entity.setCreatedAt(createdAt);
+                    try {
+                        messageRepository.saveAndFlush(entity);
+                    } catch (DataIntegrityViolationException ex) {
+                        throw new ConflictException("DUPLICATE_MESSAGE_ID", "Message ID already exists: " + messageId);
+                    }
+
+                    keyStore.storeSecret(ephemeralKeyId + "-priv", ephemeralKem.privateKey());
+
+                    auditLogService.appendEvent(
+                            senderUsername,
+                            "SECURE_MESSAGE_SENT",
+                            messageId,
+                            "Encrypted with ephemeral ML-KEM-768 + HKDF-SHA-256 + AES-256-GCM and signed with ML-DSA-65 for "
+                                    + recipientDevice.getOwner().getUsername() + " (ephemeral sender secret erased)"
+                    );
+                    return toDto(entity, null);
+                } finally {
+                    cryptoService.zeroize(ephemeralKem.privateKey(), encap.sharedSecret(), aesKey, senderSigningPriv);
+                }
+            });
         } finally {
-            cryptoService.zeroize(ephemeralKem.privateKey(), encap.sharedSecret(), aesKey, senderSigningPriv);
+            lock.unlock();
         }
     }
 
     public SecureMessageResponse receiveMessage(String messageId, ReceiveMessageRequest req) {
         String caller = SecurityUtils.currentUsername();
         boolean isAdmin = SecurityUtils.isAdmin();
+
+        ReentrantLock lock = messageLocks[Math.floorMod(messageId.hashCode(), LOCK_STRIPES)];
+        lock.lock();
+        try {
+            return receiveMessageLocked(messageId, req, caller, isAdmin);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    private SecureMessageResponse receiveMessageLocked(String messageId, ReceiveMessageRequest req, String caller, boolean isAdmin) {
 
         SecureMessageEntity msg = messageRepository.findByMessageId(messageId)
                 .orElseThrow(() -> new ResourceNotFoundException("Secure message not found: " + messageId));
@@ -262,16 +289,34 @@ public class SecureMessagingService {
             );
         }
 
-        // 4. Device revocation enforcement for recipient's device
+        // 4. Device and account status enforcement for sender and recipient
+        if (msg.getRecipientDevice().getOwner() == null || !msg.getRecipientDevice().getOwner().isActive()) {
+            auditLogService.appendEvent(
+                    caller,
+                    "SECURE_MESSAGE_REJECTED",
+                    messageId,
+                    "Rejected delivery: recipient account is inactive"
+            );
+            throw new AccessDeniedBusinessException("RECIPIENT_INACTIVE", "Recipient account is disabled");
+        }
         if (!"ACTIVE".equals(msg.getRecipientDevice().getStatus())) {
             markMessageRejected(messageId, "RECIPIENT_DEVICE_REVOKED");
             auditLogService.appendEvent(
                     caller,
                     "SECURE_MESSAGE_REJECTED",
                     messageId,
-                    "Rejected delivery: recipient device " + msg.getRecipientDevice().getDeviceUid() + " is revoked"
+                    "Rejected delivery: recipient device " + msg.getRecipientDevice().getDeviceUid() + " is " + msg.getRecipientDevice().getStatus()
             );
             throw new AccessDeniedBusinessException("RECIPIENT_REVOKED", "Recipient device is revoked");
+        }
+        if (msg.getSenderDevice() == null || !"ACTIVE".equals(msg.getSenderDevice().getStatus())) {
+            auditLogService.appendEvent(
+                    caller,
+                    "SECURE_MESSAGE_REJECTED",
+                    messageId,
+                    "Rejected delivery: sender device is inactive or revoked"
+            );
+            throw new AccessDeniedBusinessException("SENDER_DEVICE_INACTIVE", "Sender device is no longer active");
         }
 
         // 5. Verify AAD recipient binding inside envelope
@@ -317,7 +362,15 @@ public class SecureMessagingService {
         }
 
         // 7. Load (do NOT erase yet) ephemeral ML-KEM-768 private key, decapsulate & decrypt AES-256-GCM
-        byte[] ephPriv = keyStore.loadSecret(msg.getEphemeralKeyId() + "-priv");
+        byte[] ephPriv;
+        try {
+            ephPriv = keyStore.loadSecret(msg.getEphemeralKeyId() + "-priv");
+        } catch (ResourceNotFoundException ex) {
+            if (consumedRepository.existsByMessageId(messageId)) {
+                throw new ConflictException("REPLAY_DETECTED", "Duplicate messageId rejected: " + messageId);
+            }
+            throw ex;
+        }
         byte[] sharedSecret = null;
         byte[] aesKey = null;
         String plaintext;
@@ -352,7 +405,11 @@ public class SecureMessagingService {
             consumed.setSenderUsername(latestMsg.getSenderUsername());
             consumed.setAadHash(HashUtil.sha256Hex(latestMsg.getAadJson()));
             consumed.setConsumedAt(Instant.now());
-            consumedRepository.saveAndFlush(consumed);
+            try {
+                consumedRepository.saveAndFlush(consumed);
+            } catch (DataIntegrityViolationException ex) {
+                throw new ConflictException("REPLAY_DETECTED", "Duplicate messageId rejected: " + messageId);
+            }
 
             latestMsg.setStatus("DELIVERED");
             latestMsg.setVerificationOutcome("VERIFIED_ML_DSA_AND_GCM");

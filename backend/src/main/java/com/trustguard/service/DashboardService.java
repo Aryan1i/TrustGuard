@@ -61,9 +61,22 @@ public class DashboardService {
     }
 
     public DashboardResponse getDashboardSummary() {
-        long activeUsers = userRepository.countByActiveTrue();
-        long activeDevices = deviceRepository.countByStatus("ACTIVE");
-        long revokedDevices = deviceRepository.countByStatus("REVOKED");
+        boolean admin = com.trustguard.security.SecurityUtils.isAdmin();
+        String caller = admin ? null : com.trustguard.security.SecurityUtils.currentUsername();
+
+        long activeUsers = admin
+                ? userRepository.countByActiveTrue()
+                : userRepository.findByUsername(caller).filter(u -> u.isActive()).map(u -> 1L).orElse(0L);
+        long activeDevices;
+        long revokedDevices;
+        if (admin) {
+            activeDevices = deviceRepository.countByStatus("ACTIVE");
+            revokedDevices = deviceRepository.countByStatus("REVOKED");
+        } else {
+            var callerDevices = deviceRepository.findByOwnerUsernameOrderByEnrolledAtDesc(caller);
+            activeDevices = callerDevices.stream().filter(d -> "ACTIVE".equals(d.getStatus())).count();
+            revokedDevices = callerDevices.stream().filter(d -> "REVOKED".equals(d.getStatus())).count();
+        }
 
         KeyVersionEntity activeKey = keyManagementService.getActiveCommittedKey();
         List<KeyVersionResponse> keys = keyManagementService.listKeys();
@@ -77,19 +90,40 @@ public class DashboardService {
         Long revLatency = latestRevocation != null ? latestRevocation.getPropagationLatencyMs() : null;
 
         AuditVerifyResponse auditStatus = auditLogService.verifyChainReadOnly();
-        long auditCount = auditLogRepository.count();
+        List<com.trustguard.entity.AuditLogEntity> auditRows = auditLogRepository.findAllByOrderBySeqNumberDesc();
+        List<com.trustguard.entity.AuditLogEntity> scopedAuditRows = admin
+                ? auditRows
+                : auditRows.stream().filter(a -> caller.equals(a.getActor())).toList();
+        long auditCount = admin ? auditLogRepository.count() : scopedAuditRows.size();
 
+        List<com.trustguard.entity.SecurityAlertEntity> scopedOpenAlerts = admin
+                ? List.of()
+                : alertRepository.findAllByOrderByDetectedAtDesc().stream()
+                        .filter(a -> !a.isResolved() && caller.equals(a.getActor()))
+                        .toList();
         Map<String, Long> alertsBySeverity = new LinkedHashMap<>();
-        alertsBySeverity.put("CRITICAL", alertRepository.countBySeverityAndResolvedFalse("CRITICAL"));
-        alertsBySeverity.put("HIGH", alertRepository.countBySeverityAndResolvedFalse("HIGH"));
-        alertsBySeverity.put("MEDIUM", alertRepository.countBySeverityAndResolvedFalse("MEDIUM"));
-        alertsBySeverity.put("LOW", alertRepository.countBySeverityAndResolvedFalse("LOW"));
-        alertsBySeverity.put("INFO", alertRepository.countBySeverityAndResolvedFalse("INFO"));
+        for (String severity : List.of("CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO")) {
+            long count = admin
+                    ? alertRepository.countBySeverityAndResolvedFalse(severity)
+                    : scopedOpenAlerts.stream().filter(a -> severity.equals(a.getSeverity())).count();
+            alertsBySeverity.put(severity, count);
+        }
+        long openAlertCount = admin
+                ? alertRepository.countByResolvedFalse()
+                : scopedOpenAlerts.size();
 
-        long allowedCount = accessEventRepository.countByDecision("ALLOW");
-        long deniedCount = accessEventRepository.countByDecision("DENY");
+        long allowedCount;
+        long deniedCount;
+        if (admin) {
+            allowedCount = accessEventRepository.countByDecision("ALLOW");
+            deniedCount = accessEventRepository.countByDecision("DENY");
+        } else {
+            var callerAccessEvents = accessEventRepository.findByActorUsernameOrAuthenticatedPrincipal(caller, caller);
+            allowedCount = callerAccessEvents.stream().filter(e -> "ALLOW".equals(e.getDecision())).count();
+            deniedCount = callerAccessEvents.stream().filter(e -> "DENY".equals(e.getDecision())).count();
+        }
 
-        List<Map<String, Object>> recentEvents = auditLogRepository.findAllByOrderBySeqNumberDesc().stream()
+        List<Map<String, Object>> recentEvents = scopedAuditRows.stream()
                 .limit(8)
                 .map(a -> {
                     Map<String, Object> m = new LinkedHashMap<>();
@@ -119,7 +153,7 @@ public class DashboardService {
                 revLatency,
                 auditStatus.valid(),
                 auditCount,
-                alertRepository.countByResolvedFalse(),
+                openAlertCount,
                 alertsBySeverity,
                 allowedCount,
                 deniedCount,

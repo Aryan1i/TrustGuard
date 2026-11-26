@@ -21,8 +21,8 @@ import com.trustguard.repository.RolePermissionRepository;
 import com.trustguard.repository.SimulatedNodeRepository;
 import com.trustguard.repository.UserRepository;
 import com.trustguard.security.SecurityUtils;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
 import java.util.Arrays;
@@ -32,11 +32,13 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.locks.ReentrantLock;
 
 @Service
 public class AccessControlService {
 
     private static final int AUDIT_ACTOR_MAX_LEN = 64;
+    private static final int LOCK_STRIPES = 512;
 
     private final UserRepository userRepository;
     private final DeviceRepository deviceRepository;
@@ -49,6 +51,7 @@ public class AccessControlService {
     private final PostQuantumCryptoService cryptoService;
     private final AuditLogService auditLogService;
     private final SecurityPersistenceService persistenceService;
+    private final ReentrantLock[] requestIdLocks = new ReentrantLock[LOCK_STRIPES];
 
     public AccessControlService(
             UserRepository userRepository,
@@ -74,6 +77,9 @@ public class AccessControlService {
         this.cryptoService = cryptoService;
         this.auditLogService = auditLogService;
         this.persistenceService = persistenceService;
+        for (int i = 0; i < LOCK_STRIPES; i++) {
+            this.requestIdLocks[i] = new ReentrantLock();
+        }
     }
 
     public List<Map<String, Object>> listResources() {
@@ -127,7 +133,25 @@ public class AccessControlService {
                 .toList();
     }
 
-    @Transactional
+    private record PendingLiveAlert(
+            String ruleName,
+            String severity,
+            String actor,
+            String servicePath,
+            String explanation
+    ) {
+    }
+
+    private record AccessEvaluationTxOutcome(
+            AccessCheckResponse response,
+            String auditActor,
+            String decision,
+            String nodeCode,
+            String reason,
+            PendingLiveAlert pendingAlert
+    ) {
+    }
+
     public AccessCheckResponse checkAccess(AccessCheckRequest req) {
         String authenticatedPrincipal = SecurityUtils.currentUsername();
         boolean simulationMode = req.simulationMode();
@@ -153,18 +177,65 @@ public class AccessControlService {
             } catch (IllegalArgumentException ex) {
                 throw new IllegalArgumentException("protectedRead publicKeyB64 must be valid Base64", ex);
             }
-            if (validatedProtectedReadPk.length != PostQuantumCryptoService.ML_KEM_768_PUBLIC_KEY_BYTES) {
-                throw new IllegalArgumentException(
-                        "Invalid ML-KEM-768 public key length: expected "
-                                + PostQuantumCryptoService.ML_KEM_768_PUBLIC_KEY_BYTES + " bytes"
-                );
-            }
+            cryptoService.validateMlKem768PublicKey(validatedProtectedReadPk);
         }
 
         String requestId = (req.requestId() != null && !req.requestId().isBlank())
                 ? req.requestId().trim()
                 : "req-" + UUID.randomUUID().toString().substring(0, 12);
 
+        String resolvedActorUsername = actorUsername;
+        byte[] finalProtectedReadPk = validatedProtectedReadPk;
+
+        ReentrantLock lock = requestIdLocks[Math.floorMod(requestId.hashCode(), LOCK_STRIPES)];
+        AccessEvaluationTxOutcome outcome;
+        lock.lock();
+        try {
+            outcome = persistenceService.inTransaction(() -> evaluateAndPersistAccess(
+                    req,
+                    requestId,
+                    resolvedActorUsername,
+                    authenticatedPrincipal,
+                    simulationMode,
+                    finalProtectedReadPk
+            ));
+        } finally {
+            lock.unlock();
+        }
+
+        if (outcome.pendingAlert() != null) {
+            PendingLiveAlert alert = outcome.pendingAlert();
+            persistenceService.recordLiveAlertInNewTx(
+                    "alt",
+                    alert.ruleName(),
+                    alert.severity(),
+                    "DENIED_ATTEMPT",
+                    alert.actor(),
+                    alert.servicePath(),
+                    requestId,
+                    alert.explanation()
+            );
+        }
+
+        auditLogService.appendEvent(
+                outcome.auditActor(),
+                "ACCESS_" + outcome.decision(),
+                req.resourceKey(),
+                "requestId=" + requestId + " actor=" + resolvedActorUsername
+                        + " node=" + outcome.nodeCode() + " reason=" + outcome.reason()
+        );
+
+        return outcome.response();
+    }
+
+    private AccessEvaluationTxOutcome evaluateAndPersistAccess(
+            AccessCheckRequest req,
+            String requestId,
+            String actorUsername,
+            String authenticatedPrincipal,
+            boolean simulationMode,
+            byte[] validatedProtectedReadPk
+    ) {
         if (accessEventRepository.findByRequestId(requestId).isPresent()) {
             throw new ConflictException("DUPLICATE_REQUEST_ID", "Request ID already recorded: " + requestId);
         }
@@ -181,6 +252,7 @@ public class AccessControlService {
         KeyVersionEntity keyVersion = keyManagementService.getActiveCommittedKey();
         String decision = "DENY";
         String reason = "Access denied by default";
+        PendingLiveAlert pendingAlert = null;
 
         long latestRevocationVersion = deviceService.getLatestRevocationVersion();
 
@@ -193,14 +265,11 @@ public class AccessControlService {
         } else if ("REVOKED".equals(device.getStatus()) || node.getCurrentRevocationVersion() < latestRevocationVersion) {
             reason = "REVOKED_DEVICE: Device " + device.getDeviceUid() + " rejected on node " + node.getNodeCode()
                     + " (revocation v" + node.getCurrentRevocationVersion() + ")";
-            persistenceService.recordLiveAlertInNewTx(
-                    "alt",
+            pendingAlert = new PendingLiveAlert(
                     "revoked_identity_activity",
                     "HIGH",
-                    "DENIED_ATTEMPT",
                     actorUsername,
                     req.sourceService() + " -> " + req.targetService(),
-                    requestId,
                     "Denied access attempt using revoked device " + device.getDeviceUid() + " on " + node.getNodeCode()
             );
         } else if (resource == null) {
@@ -237,27 +306,21 @@ public class AccessControlService {
                 if (!serviceAllowedForResource || !roleAllowsService) {
                     reason = "UNAUTHORIZED_SERVICE: Role " + actor.getRole() + " or resource policy denies "
                             + req.sourceService() + " -> " + req.targetService() + " (" + req.action() + ")";
-                    persistenceService.recordLiveAlertInNewTx(
-                            "alt",
+                    pendingAlert = new PendingLiveAlert(
                             "service_access_outside_approved_scope",
                             "MEDIUM",
-                            "DENIED_ATTEMPT",
                             actorUsername,
                             req.sourceService() + " -> " + req.targetService(),
-                            requestId,
                             "Denied service access attempt outside policy scope: " + reason
                     );
                 } else if (!isOwner && !"ADMIN".equalsIgnoreCase(actor.getRole())) {
                     reason = "WRONG_OWNER: Resource " + resource.getResourceKey() + " is owned by "
                             + resource.getOwner().getUsername() + ", not " + actorUsername;
-                    persistenceService.recordLiveAlertInNewTx(
-                            "alt",
+                    pendingAlert = new PendingLiveAlert(
                             "isolated_denied_request",
                             "LOW",
-                            "DENIED_ATTEMPT",
                             actorUsername,
                             req.sourceService() + " -> " + req.targetService(),
-                            requestId,
                             "Single denied cross-owner read for " + resource.getResourceKey()
                     );
                 } else {
@@ -285,15 +348,11 @@ public class AccessControlService {
         event.setNodeCode(node.getNodeCode());
         event.setTimestampUtc(now);
         event.setCreatedAt(now);
-        accessEventRepository.save(event);
-
-        String auditActor = formatAuditActor(authenticatedPrincipal, actorUsername, simulationMode);
-        auditLogService.appendEvent(
-                auditActor,
-                "ACCESS_" + decision,
-                req.resourceKey(),
-                "requestId=" + requestId + " actor=" + actorUsername + " node=" + node.getNodeCode() + " reason=" + reason
-        );
+        try {
+            accessEventRepository.saveAndFlush(event);
+        } catch (DataIntegrityViolationException ex) {
+            throw new ConflictException("DUPLICATE_REQUEST_ID", "Request ID already recorded: " + requestId);
+        }
 
         String body = null;
         String ciphertextB64 = null;
@@ -326,7 +385,7 @@ public class AccessControlService {
             }
         }
 
-        return new AccessCheckResponse(
+        AccessCheckResponse response = new AccessCheckResponse(
                 requestId,
                 decision,
                 reason,
@@ -343,6 +402,14 @@ public class AccessControlService {
                 body,
                 ciphertextB64,
                 proofHex
+        );
+        return new AccessEvaluationTxOutcome(
+                response,
+                formatAuditActor(authenticatedPrincipal, actorUsername, simulationMode),
+                decision,
+                node.getNodeCode(),
+                reason,
+                pendingAlert
         );
     }
 

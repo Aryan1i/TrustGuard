@@ -11,29 +11,30 @@ import java.util.Locale;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * In-memory sliding-window authentication rate limiter enforcing per-username
- * and per-client-IP failure thresholds with temporary lockout.
+ * In-memory sliding-window authentication rate limiter enforcing composite
+ * (username, clientIp) and per-client-IP failure thresholds with temporary lockout,
+ * preventing one attacker IP from globally locking legitimate users out from other IPs.
  */
 @Component
 public class AuthRateLimiter {
 
     private static final int MAX_BUCKET_ENTRIES = 10_000;
 
-    private final int maxFailuresPerUsername;
+    private final int maxFailuresPerUserIp;
     private final int maxFailuresPerIp;
     private final long windowSeconds;
     private final long lockoutSeconds;
 
-    private final ConcurrentHashMap<String, AttemptWindow> usernameBuckets = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, AttemptWindow> userIpBuckets = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, AttemptWindow> ipBuckets = new ConcurrentHashMap<>();
 
     public AuthRateLimiter(
-            @Value("${trustguard.auth.rate-limit.max-failures-per-username:5}") int maxFailuresPerUsername,
+            @Value("${trustguard.auth.rate-limit.max-failures-per-username:5}") int maxFailuresPerUserIp,
             @Value("${trustguard.auth.rate-limit.max-failures-per-ip:25}") int maxFailuresPerIp,
             @Value("${trustguard.auth.rate-limit.window-seconds:300}") long windowSeconds,
             @Value("${trustguard.auth.rate-limit.lockout-seconds:300}") long lockoutSeconds
     ) {
-        this.maxFailuresPerUsername = Math.max(1, maxFailuresPerUsername);
+        this.maxFailuresPerUserIp = Math.max(1, maxFailuresPerUserIp);
         this.maxFailuresPerIp = Math.max(1, maxFailuresPerIp);
         this.windowSeconds = Math.max(1, windowSeconds);
         this.lockoutSeconds = Math.max(1, lockoutSeconds);
@@ -42,13 +43,17 @@ public class AuthRateLimiter {
     public void checkAllowed(String username, String clientIp) {
         Instant now = Instant.now();
         String userKey = normalizeUsername(username);
-        if (userKey != null && isLocked(usernameBuckets, userKey, now)) {
-            throw new RateLimitExceededException(
-                    "AUTH_RATE_LIMITED",
-                    "Too many failed authentication attempts for this username. Please wait before retrying."
-            );
-        }
         String ipKey = normalizeIp(clientIp);
+
+        if (userKey != null) {
+            String compositeKey = userKey + "|" + ipKey;
+            if (isLocked(userIpBuckets, compositeKey, now)) {
+                throw new RateLimitExceededException(
+                        "AUTH_RATE_LIMITED",
+                        "Too many failed authentication attempts for this account from your IP. Please wait before retrying."
+                );
+            }
+        }
         if (isLocked(ipBuckets, ipKey, now)) {
             throw new RateLimitExceededException(
                     "AUTH_RATE_LIMITED",
@@ -60,24 +65,25 @@ public class AuthRateLimiter {
     public void recordFailure(String username, String clientIp) {
         Instant now = Instant.now();
         String userKey = normalizeUsername(username);
-        if (userKey != null) {
-            evictIfOversized(usernameBuckets, now);
-            incrementAndMaybeLock(usernameBuckets, userKey, now, maxFailuresPerUsername);
-        }
         String ipKey = normalizeIp(clientIp);
+        if (userKey != null) {
+            String compositeKey = userKey + "|" + ipKey;
+            evictIfOversized(userIpBuckets, now);
+            incrementAndMaybeLock(userIpBuckets, compositeKey, now, maxFailuresPerUserIp);
+        }
         evictIfOversized(ipBuckets, now);
         incrementAndMaybeLock(ipBuckets, ipKey, now, maxFailuresPerIp);
     }
 
-    public void recordSuccess(String username) {
+    public void recordSuccess(String username, String clientIp) {
         String userKey = normalizeUsername(username);
         if (userKey != null) {
-            usernameBuckets.remove(userKey);
+            userIpBuckets.remove(userKey + "|" + normalizeIp(clientIp));
         }
     }
 
     public void clearAll() {
-        usernameBuckets.clear();
+        userIpBuckets.clear();
         ipBuckets.clear();
     }
 

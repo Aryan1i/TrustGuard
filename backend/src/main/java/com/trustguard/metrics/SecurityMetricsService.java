@@ -13,6 +13,7 @@ import com.trustguard.repository.AccessEventRepository;
 import com.trustguard.repository.RevocationRepository;
 import com.trustguard.repository.SecurityAlertRepository;
 import com.trustguard.repository.SimulatedNodeRepository;
+import com.trustguard.security.SecurityUtils;
 import com.trustguard.service.KeyManagementService;
 import com.trustguard.service.SessionService;
 import org.springframework.stereotype.Service;
@@ -58,10 +59,14 @@ public class SecurityMetricsService {
     }
 
     public SecurityMetricsResponse calculateMetrics() {
+        boolean admin = SecurityUtils.isAdmin();
+        String caller = admin ? null : SecurityUtils.currentUsername();
+
         DetectionEvaluationResponse practiceEval = detectionService.getLatestPracticeEvaluation();
         EvaluationMetricsDto eval = practiceEval.postDetectionEvaluation();
 
         List<Long> latencies = alertRepository.findAllByOrderByDetectedAtDesc().stream()
+                .filter(alert -> admin || caller.equals(alert.getActor()))
                 .map(SecurityAlertEntity::getDetectionLatencyMs)
                 .sorted()
                 .toList();
@@ -86,10 +91,14 @@ public class SecurityMetricsService {
                     .count();
         }
 
+        int liveAccessCount = admin
+                ? (int) accessEventRepository.count()
+                : accessEventRepository.findByActorUsernameOrAuthenticatedPrincipal(caller, caller).size();
+
         return new SecurityMetricsResponse(
                 practiceEval.datasetSource(),
                 eval.sampleSize(),
-                (int) accessEventRepository.count(),
+                liveAccessCount,
                 eval.precision(),
                 eval.recall(),
                 eval.f1Score(),

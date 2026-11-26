@@ -97,6 +97,10 @@ public class JwtService {
         }
     }
 
+    public int getSigningKeyBits() {
+        return hmacKey != null ? hmacKey.length * 8 : 0;
+    }
+
     public Optional<VerifiedClaims> verifyToken(String token) {
         if (token == null || token.isBlank()) {
             return Optional.empty();
@@ -106,6 +110,18 @@ public class JwtService {
             if (parts.length != 3) {
                 return Optional.empty();
             }
+            // Enforce strict symmetric HS256 header: reject classical RSA/ECDSA (RS256/ES256/EdDSA) & alg=none downgrade tokens
+            String headerJson = new String(B64_URL_DEC.decode(parts[0]), StandardCharsets.UTF_8);
+            Map<String, Object> header = mapper.readValue(headerJson, new TypeReference<>() {});
+            Object algObj = header.get("alg");
+            Object typObj = header.get("typ");
+            if (!(algObj instanceof String alg) || !"HS256".equals(alg)) {
+                return Optional.empty();
+            }
+            if (!(typObj instanceof String typ) || !"JWT".equalsIgnoreCase(typ)) {
+                return Optional.empty();
+            }
+
             String signingInput = parts[0] + "." + parts[1];
             String expectedSigHex = HashUtil.hmacSha256Hex(hmacKey, signingInput.getBytes(StandardCharsets.UTF_8));
             String actualSigHex = new String(B64_URL_DEC.decode(parts[2]), StandardCharsets.UTF_8);
@@ -115,13 +131,20 @@ public class JwtService {
             String payloadJson = new String(B64_URL_DEC.decode(parts[1]), StandardCharsets.UTF_8);
             Map<String, Object> claims = mapper.readValue(payloadJson, new TypeReference<>() {});
             Object expObj = claims.get("exp");
+            Object iatObj = claims.get("iat");
             Object subObj = claims.get("sub");
             Object tvObj = claims.get("tv");
-            if (!(expObj instanceof Number expNum) || !(subObj instanceof String sub) || sub.isBlank() || !(tvObj instanceof Number tvNum)) {
+            if (!(expObj instanceof Number expNum)
+                    || !(iatObj instanceof Number iatNum)
+                    || !(subObj instanceof String sub)
+                    || sub.isBlank()
+                    || !(tvObj instanceof Number tvNum)) {
                 return Optional.empty();
             }
+            Instant now = Instant.now();
+            Instant iat = Instant.ofEpochSecond(iatNum.longValue());
             Instant exp = Instant.ofEpochSecond(expNum.longValue());
-            if (Instant.now().isAfter(exp)) {
+            if (iat.isAfter(now.plusSeconds(60)) || now.isAfter(exp)) {
                 return Optional.empty();
             }
             String role = claims.get("role") != null ? String.valueOf(claims.get("role")) : "";

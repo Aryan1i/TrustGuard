@@ -1,5 +1,6 @@
 server:
   port: 8080
+  forward-headers-strategy: framework
 
 spring:
   application:
@@ -22,6 +23,7 @@ spring:
 trustguard:
   keystore:
     path: ${TRUSTGUARD_KEYSTORE_PATH:./data/trustguard-keystore.json}
+    master-key: ${TRUSTGUARD_KEYSTORE_MASTER_KEY:}
   jwt:
     secret: ${TRUSTGUARD_JWT_SECRET:}
     expiration-seconds: 28800
@@ -35,4 +37,5 @@ trustguard:
       lockout-seconds: 300
   demo:
     seed-enabled: ${TRUSTGUARD_DEMO_SEED_ENABLED:true}
+    password: ${TRUSTGUARD_DEMO_PASSWORD:}
     default-grace-seconds: 60

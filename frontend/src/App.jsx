@@ -82,7 +82,7 @@ function AppShell() {
         />
         <main className="page-content">
           <Routes>
-            <Route path="/" element={<Dashboard />} />
+            <Route path="/" element={<Dashboard session={session} />} />
             <Route path="/devices" element={<Devices session={session} />} />
             <Route path="/keys" element={<KeyManagement session={session} />} />
             <Route path="/access" element={<AccessMonitor session={session} />} />

@@ -8,7 +8,7 @@ import MetricCard from '../components/MetricCard';
 import LoadingState from '../components/LoadingState';
 import { formatUtc } from '../dateUtils';
 
-export default function Dashboard() {
+export default function Dashboard({ session }) {
   const [data, setData] = useState(null);
   const [tab, setTab] = useState('activity');
   const [loading, setLoading] = useState(true);
@@ -29,7 +29,7 @@ export default function Dashboard() {
 
   useEffect(() => {
     load();
-  }, []);
+  }, [session?.username, session?.role]);
 
   if (loading && !data) return <LoadingState />;
   if (error) return <div className="banner banner-danger">{error}</div>;
@@ -117,7 +117,7 @@ export default function Dashboard() {
             </button>
           </div>
           <Link to="/audit" className="btn btn-secondary btn-sm">
-            Verify Audit Chain
+            {session?.role === 'ADMIN' ? 'Verify Audit Chain' : 'View My Audit Log'}
           </Link>
         </div>
 

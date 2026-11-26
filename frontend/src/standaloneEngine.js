@@ -22,7 +22,26 @@ const SECURITY_ALERT_LABELS = new Set([
 const MAX_PLAUSIBLE_CLOCK_OFFSET_MS = 30_000;
 const MAX_PLAUSIBLE_OFFSET_DELAY_MS = 30_000;
 const LATERAL_MOVEMENT_WINDOW_MS = 300_000;
+const SLOW_LATERAL_WINDOW_MS = 86_400_000;
 const POST_REVOCATION_TRANSITION_WINDOW_MS = 60_000;
+const STANDALONE_DEMO_PASS_STORAGE = 'trustguard_standalone_passphrase';
+
+export function getStandaloneDemoPassphrase() {
+  const configured = typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.VITE_DEMO_PASSWORD;
+  if (configured && String(configured).trim()) {
+    return String(configured).trim();
+  }
+  try {
+    let ephemeral = sessionStorage.getItem(STANDALONE_DEMO_PASS_STORAGE);
+    if (!ephemeral) {
+      ephemeral = `tg-local-${randomHex(6)}`;
+      sessionStorage.setItem(STANDALONE_DEMO_PASS_STORAGE, ephemeral);
+    }
+    return ephemeral;
+  } catch {
+    return `tg-local-${randomHex(6)}`;
+  }
+}
 
 function makeError(message, status = 400, code = 'BAD_REQUEST') {
   const err = new Error(message);
@@ -112,6 +131,7 @@ export function runDeterministicDetection(events = PRACTICE_EVENTS, approvals = 
     if (Math.abs(offset) > MAX_PLAUSIBLE_CLOCK_OFFSET_MS) return true;
     if (delayMs < 0) return true;
     if (offset !== 0 && delayMs > MAX_PLAUSIBLE_OFFSET_DELAY_MS) return true;
+    const rawMs = corrMs + offset;
     if (offset > 0) {
       for (const a of approvals) {
         if (
@@ -120,6 +140,28 @@ export function runDeterministicDetection(events = PRACTICE_EVENTS, approvals = 
           a.validUntilUtc &&
           corrMs < Date.parse(a.validUntilUtc) &&
           recMs > Date.parse(a.validUntilUtc) + 5000
+        ) {
+          return true;
+        }
+      }
+    }
+    if (offset < 0) {
+      for (const a of approvals) {
+        if (
+          a.operation === 'grant_role' &&
+          a.subject === evt.actor &&
+          a.validFromUtc &&
+          rawMs < Date.parse(a.validFromUtc) &&
+          corrMs >= Date.parse(a.validFromUtc)
+        ) {
+          return true;
+        }
+        if (
+          a.operation === 'revoke_role' &&
+          a.subject === evt.actor &&
+          a.effectiveAtUtc &&
+          rawMs < Date.parse(a.effectiveAtUtc) &&
+          corrMs >= Date.parse(a.effectiveAtUtc)
         ) {
           return true;
         }
@@ -168,7 +210,10 @@ export function runDeterministicDetection(events = PRACTICE_EVENTS, approvals = 
 
   const isKnownNormalEdge = (evt, policyMs) => {
     const { sourceService: src, targetService: dst, roleAfter: role, actor } = evt;
-    if (src === 'portal' && (dst === 'identity' || dst === 'catalog')) return true;
+    const expectedPortalActor =
+      !String(actor || '').startsWith('svc-') &&
+      (role === 'user' || role === 'operator' || role === 'admin' || role === 'analyst' || role === 'developer');
+    if (src === 'portal' && (dst === 'identity' || dst === 'catalog') && expectedPortalActor) return true;
     if (src === 'admin-console' && dst === 'identity' && role === 'operator') return true;
     if (actor === 'svc-report-worker' && src === 'reports' && dst === 'catalog') return true;
     if (role === 'report-reader' && src === 'portal') {
@@ -216,8 +261,9 @@ export function runDeterministicDetection(events = PRACTICE_EVENTS, approvals = 
     };
   });
 
-  // Track unapproved role_change events per actor across sessions
+  // Track unapproved role_change events and approved role revocations per actor across sessions
   const unapprovedRoleChangesByActor = new Map();
+  const approvedRevocationsBySubject = new Map();
   for (const ae of annotated) {
     const e = ae.raw;
     if (e.action === 'role_change' && e.roleBefore !== e.roleAfter) {
@@ -232,17 +278,38 @@ export function runDeterministicDetection(events = PRACTICE_EVENTS, approvals = 
           sessionId: e.sessionId,
         });
       }
+    } else if (e.action === 'revoke_role') {
+      const match = approvals.find(
+        (a) => a.operation === 'revoke_role' && a.approvalId === e.approvalId && a.approvedBy === e.actor
+      );
+      if (match && match.subject) {
+        if (!approvedRevocationsBySubject.has(match.subject)) {
+          approvedRevocationsBySubject.set(match.subject, []);
+        }
+        approvedRevocationsBySubject.get(match.subject).push({
+          orderIndex: ae.orderIndex,
+          policyMs: ae.policyMs,
+          eventId: e.eventId,
+        });
+      }
     }
   }
+
+  const isBefore = (first, second) =>
+    first.policyMs < second.policyMs || (first.policyMs === second.policyMs && first.orderIndex < second.orderIndex);
 
   const findPriorRoleEscalation = (actor, ae) => {
     const list = unapprovedRoleChangesByActor.get(actor);
     if (!list || list.length === 0) return null;
+    const revocations = approvedRevocationsBySubject.get(actor) || [];
     let matched = null;
     for (const rc of list) {
       if (rc.eventId === ae.raw.eventId) continue;
       if (ae.policyMs > rc.policyMs || (ae.policyMs >= rc.policyMs && ae.orderIndex > rc.orderIndex)) {
-        matched = rc;
+        const cleared = revocations.some((rev) => isBefore(rc, rev) && !isBefore(ae, rev));
+        if (!cleared) {
+          matched = rc;
+        }
       }
     }
     return matched;
@@ -309,6 +376,50 @@ export function runDeterministicDetection(events = PRACTICE_EVENTS, approvals = 
             : `${seqEvents.length} sequential unexpected service edges grouped in session ${sessSummary} / ${corrSummary}. All requests were DENIED; classified as candidate lateral-movement reconnaissance, NOT successful compromise.`,
           datasetSource: 'PRACTICE_22_EVENTS',
         });
+      }
+    }
+
+    // Slow-and-low lateral reconnaissance over 24h window (>= 3 distinct unexpected targetServices)
+    const remaining = sorted.filter((a) => !lateralIds.has(a.raw.eventId));
+    let i = 0;
+    while (i < remaining.length) {
+      const windowEvents = [];
+      const targets = new Set();
+      let j = i;
+      while (j < remaining.length && remaining[j].policyMs - remaining[i].policyMs <= SLOW_LATERAL_WINDOW_MS) {
+        windowEvents.push(remaining[j]);
+        targets.add(remaining[j].raw.targetService);
+        j += 1;
+      }
+      if (targets.size >= 3) {
+        const ids = windowEvents.map((a) => a.raw.eventId);
+        ids.forEach((id) => lateralIds.add(id));
+        const hops = windowEvents.map((a, idx) =>
+          idx === 0 ? `${a.raw.sourceService} -> ${a.raw.targetService}` : a.raw.targetService
+        );
+        const first = windowEvents[0].raw;
+        const hasAllowedHop = windowEvents.some((a) => a.raw.outcome.toLowerCase() === 'allow');
+        const sessions = [...new Set(windowEvents.map((a) => a.raw.sessionId).filter(Boolean))];
+        const correlations = [...new Set(windowEvents.map((a) => a.raw.correlationId).filter(Boolean))];
+        const sessSummary = sessions.join(',');
+        const corrSummary = correlations.join(',');
+        alerts.push({
+          alertUid: `prac-alt-${seq++}`,
+          ruleName: 'lateral_movement_candidate',
+          severity: hasAllowedHop ? 'CRITICAL' : 'HIGH',
+          outcomeClassification: hasAllowedHop ? 'CONFIRMED_VIOLATION' : 'DENIED_ATTEMPT',
+          actor: first.actor,
+          servicePath: hops.join(' -> '),
+          eventIds: ids,
+          correlationId: corrSummary,
+          sessionId: sessSummary,
+          timestamp: windowEvents[windowEvents.length - 1].correctedEventTimeUtc,
+          explanation: `${windowEvents.length} slow-and-low unexpected service edges across ${targets.size} distinct targets by ${first.actor} within 24h horizon (session ${sessSummary}).`,
+          datasetSource: 'PRACTICE_22_EVENTS',
+        });
+        i = j;
+      } else {
+        i += 1;
       }
     }
   }
@@ -782,7 +893,7 @@ export const standaloneEngine = {
   async login(username, password) {
     const state = await getState();
     const u = state.users.find((x) => x.username === String(username || '').trim());
-    if (!u || password !== 'TrustGuard!Demo2026') {
+    if (!u || password !== getStandaloneDemoPassphrase()) {
       throw makeError('Invalid username or password', 401, 'INVALID_CREDENTIALS');
     }
     const expiresAt = new Date(Date.now() + 8 * 3600 * 1000).toISOString();
@@ -818,23 +929,36 @@ export const standaloneEngine = {
   },
 
   async getDashboard(session) {
-    getCurrentUser(session);
+    const caller = getCurrentUser(session);
+    const isAdmin = caller.role === 'ADMIN';
     const state = await getState();
     const activeKey = [...state.keys].reverse().find((k) => k.status === 'COMMITTED') || state.keys[0];
     const latestKey = state.keys[state.keys.length - 1];
     const ackedNodes = (latestKey?.acknowledgements || []).filter((a) => a.ackStatus === 'ACKNOWLEDGED').length;
     const latestRev = state.revocations[state.revocations.length - 1] || null;
     const auditStatus = await verifyAuditReadOnly(state);
-    const allAlerts = [...state.liveAlerts, ...(state.practiceEvaluation?.generatedAlerts || [])];
+    const scopedAudits = isAdmin
+      ? state.auditLogs
+      : state.auditLogs.filter((a) => a.actor === caller.username);
+    const scopedDevices = isAdmin
+      ? state.devices
+      : state.devices.filter((d) => d.ownerUsername === caller.username);
+    const scopedAccessEvents = isAdmin
+      ? state.accessEvents
+      : state.accessEvents.filter((e) => e.actorUsername === caller.username || e.authenticatedPrincipal === caller.username);
+    const allAlerts = [...state.liveAlerts, ...(state.practiceEvaluation?.generatedAlerts || [])]
+      .filter((a) => isAdmin || a.actor === caller.username);
     const bySev = { CRITICAL: 0, HIGH: 0, MEDIUM: 0, LOW: 0, INFO: 0 };
     allAlerts.forEach((a) => {
       bySev[a.severity] = (bySev[a.severity] || 0) + 1;
     });
     const metricsSummary = await this.getSecurityMetrics(session);
     return {
-      activeUsers: state.users.filter((u) => u.active).length,
-      activeDevices: state.devices.filter((d) => d.status === 'ACTIVE').length,
-      revokedDevices: state.devices.filter((d) => d.status === 'REVOKED').length,
+      activeUsers: isAdmin
+        ? state.users.filter((u) => u.active).length
+        : state.users.filter((u) => u.username === caller.username && u.active).length,
+      activeDevices: scopedDevices.filter((d) => d.status === 'ACTIVE').length,
+      revokedDevices: scopedDevices.filter((d) => d.status === 'REVOKED').length,
       activeKeyVersion: activeKey.versionNumber,
       activeKeyAlgorithm: activeKey.algorithm,
       activeKeyStatus: activeKey.status,
@@ -843,12 +967,12 @@ export const standaloneEngine = {
       latestRevocationVersion: latestRev ? latestRev.revocationVersion : 0,
       lastRevocationPropagationMs: latestRev ? latestRev.propagationLatencyMs : null,
       auditChainVerified: auditStatus.valid,
-      auditEntryCount: state.auditLogs.length,
+      auditEntryCount: scopedAudits.length,
       openAlertCount: allAlerts.length,
       openAlertsBySeverity: bySev,
-      allowedAccessCount: state.accessEvents.filter((e) => e.decision === 'ALLOW').length,
-      deniedAccessCount: state.accessEvents.filter((e) => e.decision === 'DENY').length,
-      recentEvents: [...state.auditLogs]
+      allowedAccessCount: scopedAccessEvents.filter((e) => e.decision === 'ALLOW').length,
+      deniedAccessCount: scopedAccessEvents.filter((e) => e.decision === 'DENY').length,
+      recentEvents: [...scopedAudits]
         .reverse()
         .slice(0, 8)
         .map((a) => ({
@@ -902,11 +1026,20 @@ export const standaloneEngine = {
     if (!owner) throw makeError(`User not found: ${targetOwner}`, 404, 'NOT_FOUND');
     if (!owner.active) throw makeError('Cannot enroll devices for inactive user', 403, 'ACCOUNT_DISABLED');
     if (caller.role !== 'ADMIN') {
-      const hasRevoked = state.devices.some((d) => d.ownerUsername === targetOwner && d.status === 'REVOKED') ||
-        state.revocations.some((r) => r.username === targetOwner);
-      const hasActive = state.devices.some((d) => d.ownerUsername === targetOwner && d.status === 'ACTIVE');
-      if (hasRevoked || !hasActive) {
-        throw makeError('Self-service enrollment denied: ADMIN approval required', 403, 'ADMIN_APPROVAL_REQUIRED');
+      if (!payload.replacesDeviceId) {
+        throw makeError(
+          'Self-service enrollment requires replacing an active caller-owned device (ADMIN approval required for new devices)',
+          403,
+          'REPLACEMENT_DEVICE_REQUIRED'
+        );
+      }
+      const oldDev = state.devices.find((d) => d.id === Number(payload.replacesDeviceId));
+      if (!oldDev || oldDev.ownerUsername !== caller.username || oldDev.status !== 'ACTIVE') {
+        throw makeError(
+          'Replacement device must be an ACTIVE device owned by the caller',
+          403,
+          'REPLACE_DEVICE_NOT_ACTIVE'
+        );
       }
     }
 
@@ -997,7 +1130,7 @@ export const standaloneEngine = {
   },
 
   async getNodes(session) {
-    getCurrentUser(session);
+    requireAdmin(session);
     const state = await getState();
     return state.nodes;
   },
@@ -1016,13 +1149,13 @@ export const standaloneEngine = {
   },
 
   async getKeys(session) {
-    getCurrentUser(session);
+    requireAdmin(session);
     const state = await getState();
     return [...state.keys].reverse();
   },
 
   async getRotationStatus(session) {
-    getCurrentUser(session);
+    requireAdmin(session);
     const state = await getState();
     const active = [...state.keys].reverse().find((k) => k.status === 'COMMITTED') || state.keys[0];
     const latest = state.keys[state.keys.length - 1];
@@ -1300,16 +1433,33 @@ export const standaloneEngine = {
   },
 
   async getAuditLogs(session) {
-    getCurrentUser(session);
+    const caller = getCurrentUser(session);
+    const isAdmin = caller.role === 'ADMIN';
     const state = await getState();
+    const globalVer = await verifyAuditReadOnly(state);
+    const scopedEntries = [...state.auditLogs]
+      .reverse()
+      .filter((e) => isAdmin || e.actor === caller.username);
     return {
-      entries: [...state.auditLogs].reverse(),
-      latestVerification: await verifyAuditReadOnly(state),
+      entries: scopedEntries,
+      latestVerification: isAdmin
+        ? globalVer
+        : {
+            ...globalVer,
+            totalEntries: scopedEntries.length,
+            checkedEntries: scopedEntries.length,
+            firstMismatchSeq: null,
+            firstMismatchEventId: null,
+            expectedHash: null,
+            actualHash: null,
+            verificationFailuresCount: globalVer.valid ? 0 : 1,
+            message: `Caller-scoped audit view (${scopedEntries.length} entries for ${caller.username})`,
+          },
     };
   },
 
   async verifyAuditChain(session) {
-    getCurrentUser(session);
+    requireAdmin(session);
     const state = await getState();
     const res = await verifyAuditReadOnly(state);
     if (!res.valid) {
@@ -1347,9 +1497,12 @@ export const standaloneEngine = {
   },
 
   async getAlerts(session) {
-    getCurrentUser(session);
+    const caller = getCurrentUser(session);
     const state = await getState();
-    return [...state.liveAlerts, ...(state.practiceEvaluation?.generatedAlerts || [])];
+    const all = [...state.liveAlerts, ...(state.practiceEvaluation?.generatedAlerts || [])];
+    return caller.role === 'ADMIN'
+      ? all
+      : all.filter((a) => a.actor === caller.username);
   },
 
   async getLatestDetection(session) {
@@ -1468,6 +1621,15 @@ export const standaloneEngine = {
     if (msg.recipientUsername !== caller.username && !isAdmin) {
       throw makeError(`Caller ${caller.username} is not authorized to receive messages for ${msg.recipientUsername}`, 403, 'RECIPIENT_MISMATCH');
     }
+    const senderDev = state.devices.find((d) => d.deviceUid === msg.senderDeviceUid);
+    if (!senderDev || senderDev.status !== 'ACTIVE') {
+      throw makeError('Sender device is inactive or revoked', 403, 'SENDER_DEVICE_INACTIVE');
+    }
+    const rcptUser = state.users.find((u) => u.username === msg.recipientUsername);
+    const rcptDev = state.devices.find((d) => d.deviceUid === msg.recipientDeviceUid);
+    if (!rcptUser?.active || !rcptDev || rcptDev.status !== 'ACTIVE') {
+      throw makeError('Recipient identity or device is inactive or revoked', 403, 'RECIPIENT_INACTIVE');
+    }
 
     if (state.consumedMessageIds.includes(messageId)) {
       state.liveAlerts.unshift({
@@ -1539,7 +1701,7 @@ export const standaloneEngine = {
   },
 
   async getBackups(session) {
-    getCurrentUser(session);
+    requireAdmin(session);
     const state = await getState();
     return [...state.backups].reverse();
   },
@@ -1591,7 +1753,7 @@ export const standaloneEngine = {
   },
 
   async verifyBackup(session, id) {
-    getCurrentUser(session);
+    requireAdmin(session);
     const state = await getState();
     const bak = state.backups.find((b) => b.backupId === id);
     if (!bak) throw makeError('Backup not found', 404, 'NOT_FOUND');
@@ -1686,8 +1848,8 @@ export const standaloneEngine = {
     const state = await getState();
     const myDev = state.devices.find((d) => d.ownerUsername === caller.username && d.status === 'ACTIVE');
     const peerDev = peerDeviceId ? state.devices.find((d) => d.id === Number(peerDeviceId)) : myDev;
-    if (!myDev || !peerDev || peerDev.status === 'REVOKED') {
-      throw makeError('Cannot open session with missing or revoked device', 403, 'DEVICE_REVOKED');
+    if (!myDev || !peerDev || peerDev.status !== 'ACTIVE') {
+      throw makeError('Cannot open session with missing or inactive device', 403, 'DEVICE_REVOKED');
     }
     const now = new Date().toISOString();
     const rec = {
@@ -1731,10 +1893,10 @@ export const standaloneEngine = {
     }
     const dev = state.devices.find((d) => d.deviceUid === rec.deviceUid);
     const peer = state.devices.find((d) => d.deviceUid === rec.peerDeviceUid);
-    if (dev?.status === 'REVOKED' || peer?.status === 'REVOKED') {
+    if (!dev || !peer || dev.status !== 'ACTIVE' || peer.status !== 'ACTIVE') {
       rec.status = 'REVOKED';
       saveState(state);
-      throw makeError('Resumption denied: device revoked', 403, 'DEVICE_REVOKED');
+      throw makeError('Resumption denied: device inactive or revoked', 403, 'DEVICE_REVOKED');
     }
     rec.status = 'RESUMED';
     rec.resumedCount += 1;
@@ -1818,16 +1980,20 @@ export const standaloneEngine = {
   },
 
   async getSecurityMetrics(session) {
-    getCurrentUser(session);
+    const caller = getCurrentUser(session);
+    const isAdmin = caller.role === 'ADMIN';
     const state = await getState();
     const evalRes = state.practiceEvaluation || runDeterministicDetection();
     const ev = evalRes.postDetectionEvaluation;
     const latestRev = state.revocations[state.revocations.length - 1] || null;
     const latestKey = state.keys[state.keys.length - 1];
+    const scopedAccessCount = isAdmin
+      ? state.accessEvents.length
+      : state.accessEvents.filter((e) => e.actorUsername === caller.username || e.authenticatedPrincipal === caller.username).length;
     return {
       datasetSource: evalRes.datasetSource,
       practiceSampleSize: ev.sampleSize,
-      liveAccessSampleSize: state.accessEvents.length,
+      liveAccessSampleSize: scopedAccessCount,
       precision: ev.precision,
       recall: ev.recall,
       f1Score: ev.f1Score,

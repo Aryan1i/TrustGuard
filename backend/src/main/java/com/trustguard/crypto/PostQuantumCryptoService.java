@@ -51,6 +51,13 @@ public class PostQuantumCryptoService {
     private static final int AES_GCM_TAG_BITS = 128;
     private static final int AES_GCM_IV_BYTES = 12;
     public static final int ML_KEM_768_PUBLIC_KEY_BYTES = 1184;
+    public static final int ML_KEM_768_PRIVATE_KEY_BYTES = 2400;
+    public static final int ML_KEM_768_CIPHERTEXT_BYTES = 1088;
+    public static final int ML_DSA_65_PUBLIC_KEY_BYTES = 1952;
+    public static final int ML_DSA_65_PRIVATE_KEY_BYTES = 4032;
+    public static final int ML_DSA_65_SIGNATURE_BYTES = 3309;
+    private static final int ML_KEM_MODULUS_Q = 3329;
+    private static final int ML_KEM_768_T_BYTES = 1152; // 768 * 12 bits / 8
 
     private final SecureRandom secureRandom = new SecureRandom();
 
@@ -72,10 +79,60 @@ public class PostQuantumCryptoService {
         return new RawKeyPair(pk, sk, HashUtil.sha256Hex(pk));
     }
 
-    public KemEncapsulation encapsulateMlKem768(byte[] rawPublicKey) {
+    /**
+     * NIST FIPS 203 Section 7.2 encapsulation key validation:
+     * enforces exact 1184-byte size, non-zero key vector, and ByteDecode_12
+     * coefficient bounds (< q = 3329) to reject classical/corrupt/degenerate keys.
+     */
+    public void validateMlKem768PublicKey(byte[] rawPublicKey) {
         if (rawPublicKey == null || rawPublicKey.length != ML_KEM_768_PUBLIC_KEY_BYTES) {
-            throw new IllegalArgumentException("Invalid ML-KEM-768 raw public key length");
+            throw new IllegalArgumentException(
+                    "Invalid ML-KEM-768 raw public key length: expected " + ML_KEM_768_PUBLIC_KEY_BYTES + " bytes"
+            );
         }
+        boolean anyNonZero = false;
+        for (int i = 0; i < ML_KEM_768_T_BYTES; i += 3) {
+            int b0 = rawPublicKey[i] & 0xFF;
+            int b1 = rawPublicKey[i + 1] & 0xFF;
+            int b2 = rawPublicKey[i + 2] & 0xFF;
+            if ((b0 | b1 | b2) != 0) {
+                anyNonZero = true;
+            }
+            int d1 = b0 | ((b1 & 0x0F) << 8);
+            int d2 = (b1 >>> 4) | (b2 << 4);
+            if (d1 >= ML_KEM_MODULUS_Q || d2 >= ML_KEM_MODULUS_Q) {
+                throw new IllegalArgumentException("Invalid ML-KEM-768 public key: coefficient exceeds q=3329 (FIPS 203 check failed)");
+            }
+        }
+        if (!anyNonZero) {
+            throw new IllegalArgumentException("Invalid ML-KEM-768 public key: degenerate all-zero encapsulation key");
+        }
+    }
+
+    public boolean isValidMlDsa65PublicKey(byte[] rawPublicKey) {
+        if (rawPublicKey == null || rawPublicKey.length != ML_DSA_65_PUBLIC_KEY_BYTES) {
+            return false;
+        }
+        boolean anyNonZero = false;
+        for (byte b : rawPublicKey) {
+            if (b != 0) {
+                anyNonZero = true;
+                break;
+            }
+        }
+        if (!anyNonZero) {
+            return false;
+        }
+        try {
+            new MLDSAPublicKeyParameters(MLDSAParameters.ml_dsa_65, rawPublicKey);
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    public KemEncapsulation encapsulateMlKem768(byte[] rawPublicKey) {
+        validateMlKem768PublicKey(rawPublicKey);
         MLKEMPublicKeyParameters pubParams = new MLKEMPublicKeyParameters(MLKEMParameters.ml_kem_768, rawPublicKey);
         MLKEMGenerator kemGenerator = new MLKEMGenerator(secureRandom);
         SecretWithEncapsulation encapsulated = kemGenerator.generateEncapsulated(pubParams);
@@ -83,6 +140,12 @@ public class PostQuantumCryptoService {
     }
 
     public byte[] decapsulateMlKem768(byte[] rawPrivateKey, byte[] ciphertext) {
+        if (rawPrivateKey == null || rawPrivateKey.length != ML_KEM_768_PRIVATE_KEY_BYTES) {
+            throw new IllegalArgumentException("Invalid ML-KEM-768 raw private key length");
+        }
+        if (ciphertext == null || ciphertext.length != ML_KEM_768_CIPHERTEXT_BYTES) {
+            throw new IllegalArgumentException("Invalid ML-KEM-768 ciphertext length");
+        }
         MLKEMPrivateKeyParameters privParams = new MLKEMPrivateKeyParameters(MLKEMParameters.ml_kem_768, rawPrivateKey);
         MLKEMExtractor extractor = new MLKEMExtractor(privParams);
         return extractor.extractSecret(ciphertext);
@@ -98,6 +161,9 @@ public class PostQuantumCryptoService {
     }
 
     public byte[] signMlDsa65(byte[] rawPrivateKey, byte[] message) {
+        if (rawPrivateKey == null || rawPrivateKey.length != ML_DSA_65_PRIVATE_KEY_BYTES) {
+            throw new IllegalArgumentException("Invalid ML-DSA-65 private key length");
+        }
         try {
             MLDSAPrivateKeyParameters privParams = new MLDSAPrivateKeyParameters(MLDSAParameters.ml_dsa_65, rawPrivateKey);
             MLDSASigner signer = new MLDSASigner();
@@ -110,6 +176,9 @@ public class PostQuantumCryptoService {
     }
 
     public boolean verifyMlDsa65(byte[] rawPublicKey, byte[] message, byte[] signature) {
+        if (!isValidMlDsa65PublicKey(rawPublicKey) || signature == null || signature.length != ML_DSA_65_SIGNATURE_BYTES || message == null) {
+            return false;
+        }
         try {
             MLDSAPublicKeyParameters pubParams = new MLDSAPublicKeyParameters(MLDSAParameters.ml_dsa_65, rawPublicKey);
             MLDSASigner verifier = new MLDSASigner();

@@ -25,11 +25,17 @@ export default function Devices({ session }) {
   const [revokeTarget, setRevokeTarget] = useState(null);
   const [revokeReason, setRevokeReason] = useState('Lost or compromised device');
 
+  const isAdmin = session?.role === 'ADMIN';
+
   const loadAll = async () => {
     setLoading(true);
     setError('');
     try {
-      const [d, u, n] = await Promise.all([api.getDevices(), api.getUsers(), api.getNodes()]);
+      const [d, u, n] = await Promise.all([
+        api.getDevices(),
+        api.getUsers(),
+        isAdmin ? api.getNodes() : Promise.resolve([]),
+      ]);
       setDevices(d);
       setUsers(u);
       setNodes(n);
@@ -42,7 +48,7 @@ export default function Devices({ session }) {
 
   useEffect(() => {
     loadAll();
-  }, [session?.username]);
+  }, [isAdmin, session?.username]);
 
   const handleEnrol = async (e) => {
     e.preventDefault();
@@ -143,13 +149,15 @@ export default function Devices({ session }) {
           deltaTone={revokedCount > 0 ? 'down' : 'neutral'}
           meta="Rejected on all nodes"
         />
-        <StatCard
-          label="Enforcing Nodes"
-          value={`${onlineNodes} / ${nodes.length}`}
-          delta="Synced"
-          deltaTone="up"
-          meta="Cluster revocation state"
-        />
+        {isAdmin && (
+          <StatCard
+            label="Enforcing Nodes"
+            value={`${onlineNodes} / ${nodes.length}`}
+            delta="Synced"
+            deltaTone="up"
+            meta="Cluster revocation state"
+          />
+        )}
       </div>
 
       {showEnrolForm && (
@@ -186,14 +194,20 @@ export default function Devices({ session }) {
                 />
               </div>
               <div className="field">
-                <label>Replaces Revoked Device (Optional)</label>
-                <select value={replacesDeviceId} onChange={(e) => setReplacesDeviceId(e.target.value)}>
-                  <option value="">None (New enrollment)</option>
+                <label>
+                  {isAdmin ? 'Replaces Existing Device (Optional)' : 'Active Device to Replace (Required)'}
+                </label>
+                <select
+                  value={replacesDeviceId}
+                  onChange={(e) => setReplacesDeviceId(e.target.value)}
+                  required={!isAdmin}
+                >
+                  <option value="">{isAdmin ? 'None (New enrollment)' : 'Select active device to replace...'}</option>
                   {devices
-                    .filter((d) => d.status === 'REVOKED')
+                    .filter((d) => (isAdmin ? true : d.status === 'ACTIVE' && d.ownerUsername === session?.username))
                     .map((d) => (
                       <option key={d.id} value={d.id}>
-                        {d.deviceUid} ({d.ownerUsername})
+                        {d.deviceUid} ({d.ownerUsername} · {d.status})
                       </option>
                     ))}
                 </select>
@@ -271,29 +285,31 @@ export default function Devices({ session }) {
         />
       </div>
 
-      <div className="card">
-        <div className="card-header">
-          <div>
-            <h2 className="card-title">Cluster Node Enforcement</h2>
-            <p className="card-subtitle">Revocation versions enforced per node.</p>
+      {isAdmin && (
+        <div className="card">
+          <div className="card-header">
+            <div>
+              <h2 className="card-title">Cluster Node Enforcement</h2>
+              <p className="card-subtitle">Revocation versions enforced per node.</p>
+            </div>
           </div>
+          <DataTable
+            rowKey={(n) => n.nodeCode}
+            rows={nodes}
+            columns={[
+              { key: 'nodeCode', header: 'Node', render: (n) => <span className="mono">{n.nodeCode}</span> },
+              { key: 'nodeName', header: 'Node Name' },
+              { key: 'currentRevocationVersion', header: 'Revocation Ver', render: (n) => `v${n.currentRevocationVersion}` },
+              {
+                key: 'lastPropagationMs',
+                header: 'Propagation',
+                render: (n) => (n.lastPropagationMs != null ? `${n.lastPropagationMs} ms` : '—'),
+              },
+              { key: 'status', header: 'Status', render: (n) => <StatusBadge status={n.status} /> },
+            ]}
+          />
         </div>
-        <DataTable
-          rowKey={(n) => n.nodeCode}
-          rows={nodes}
-          columns={[
-            { key: 'nodeCode', header: 'Node', render: (n) => <span className="mono">{n.nodeCode}</span> },
-            { key: 'nodeName', header: 'Node Name' },
-            { key: 'currentRevocationVersion', header: 'Revocation Ver', render: (n) => `v${n.currentRevocationVersion}` },
-            {
-              key: 'lastPropagationMs',
-              header: 'Propagation',
-              render: (n) => (n.lastPropagationMs != null ? `${n.lastPropagationMs} ms` : '—'),
-            },
-            { key: 'status', header: 'Status', render: (n) => <StatusBadge status={n.status} /> },
-          ]}
-        />
-      </div>
+      )}
 
       <ConfirmModal
         open={Boolean(revokeTarget)}

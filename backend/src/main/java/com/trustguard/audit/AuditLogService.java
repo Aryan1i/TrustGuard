@@ -4,6 +4,7 @@ import com.trustguard.dto.AuditVerifyResponse;
 import com.trustguard.entity.AuditLogEntity;
 import com.trustguard.exception.ResourceNotFoundException;
 import com.trustguard.repository.AuditLogRepository;
+import com.trustguard.security.SecurityUtils;
 import com.trustguard.util.CanonicalJsonUtil;
 import com.trustguard.util.HashUtil;
 import com.zaxxer.hikari.HikariDataSource;
@@ -221,8 +222,12 @@ public class AuditLogService {
     }
 
     public AuditVerifyResponse.AuditListResponse listAuditLogs() {
+        boolean admin = SecurityUtils.isAdmin();
+        String caller = admin ? null : SecurityUtils.currentUsername();
+        AuditVerifyResponse globalStatus = verifyChainReadOnly();
         List<AuditVerifyResponse.AuditEntryDto> entries = auditLogRepository.findAllByOrderBySeqNumberDesc()
                 .stream()
+                .filter(e -> admin || caller.equals(e.getActor()))
                 .map(e -> new AuditVerifyResponse.AuditEntryDto(
                         e.getId(),
                         e.getEventId(),
@@ -236,7 +241,22 @@ public class AuditLogService {
                         e.getCurrentHash()
                 ))
                 .toList();
-        return new AuditVerifyResponse.AuditListResponse(entries, verifyChainReadOnly());
+        AuditVerifyResponse scopedVerification = admin
+                ? globalStatus
+                : new AuditVerifyResponse(
+                        globalStatus.valid(),
+                        entries.size(),
+                        entries.size(),
+                        null,
+                        null,
+                        null,
+                        null,
+                        globalStatus.valid() ? 0 : 1,
+                        "Caller-scoped audit view (" + entries.size() + " entries for " + caller + ")",
+                        LIMITATION_NOTICE,
+                        globalStatus.verifiedAt()
+                );
+        return new AuditVerifyResponse.AuditListResponse(entries, scopedVerification);
     }
 
     public AuditVerifyResponse verifyChain() {

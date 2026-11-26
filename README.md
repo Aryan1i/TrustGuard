@@ -31,7 +31,7 @@ TrustGuard/
 │   ├── evidence-matrix.md     # 12 Track 4 security goals with measured/partial statuses
 │   ├── demo-script.md         # Five-minute walkthrough script
 │   ├── two-page-brief.md      # Two-page submission brief source
-│   └── two-page-brief.pdf     # Rendered two-page brief PDF
+│   └── two-page-brief.pdf     # Rendered two-page brief PDF (<= 2 pages)
 └── README.md
 ```
 
@@ -93,11 +93,21 @@ export DB_PASSWORD="<your-mysql-password>"
 
 ## 3. Run the Backend (Spring Boot)
 
-First run the full JUnit 5 & Mockito test suite:
+First run the full JUnit 5 suite (35 tests across 5 suites: unit, integration, crash recovery, PQC, and security regression):
 
 ```sh
 cd TrustGuard/backend
-mvn test
+mvn clean test
+```
+
+Configure required security secrets before running outside `local`/`test` profiles (`prod`):
+
+```sh
+export TRUSTGUARD_JWT_SECRET="<at-least-32-bytes-random-secret>"
+export TRUSTGUARD_KEYSTORE_MASTER_KEY="<at-least-32-bytes-aes-256-gcm-master-key>"
+# Demo seeding is disabled outside local/test unless explicitly opted in with >=12 char passphrase:
+# export TRUSTGUARD_DEMO_SEED_ENABLED=true
+# export TRUSTGUARD_DEMO_PASSWORD="<strong-demo-passphrase>"
 ```
 
 Start the backend server (MySQL default profile):
@@ -107,14 +117,14 @@ cd TrustGuard/backend
 mvn spring-boot:run
 ```
 
-Or run with persistent file-backed local MySQL-compatibility mode:
+Or run with persistent file-backed local MySQL-compatibility mode (sets `TRUSTGUARD_DEMO_PASSWORD` or generates an ephemeral 24-character passphrase logged at startup):
 
 ```sh
 cd TrustGuard/backend
 mvn spring-boot:run -Dspring-boot.run.profiles=local
 ```
 
-Backend runs on `http://localhost:8080`.
+Backend runs on `http://localhost:8080`. Defaults include a `60 s` key rotation grace period (`trustguard.demo.default-grace-seconds: 60`) and `±30,000 ms` (`±30 s`) detector clock-offset plausibility bounds.
 
 ---
 
@@ -134,28 +144,29 @@ Open `http://localhost:5173`. Vite proxies `/api/*` directly to `http://localhos
 - If `VITE_API_BASE_URL` is **not** set on Vercel (static frontend only), the app automatically activates browser persistence and WebCrypto security evaluation so authentication and all 9 views work immediately.
 - To connect the full Java 21 / Spring Boot / BouncyCastle `ML-KEM-768` & `ML-DSA-65` backend, deploy `backend/` to a JVM host (Render, Railway, Fly.io, or Docker) and set `VITE_API_BASE_URL` in Vercel environment variables.
 
-### Synthetic Demo Identities
+### Synthetic Demo Identities & Security Hardening
 
-The application seeds four synthetic hackathon users (`alice`, `bob`, `charlie`, `admin`) with BCrypt-hashed credentials. The synthetic demo password defaults to `TrustGuard!Demo2026` (overridable via `TRUSTGUARD_DEMO_PASSWORD`) and can be entered directly or triggered via the one-click synthetic identity buttons on the sign-in screen (which perform a real `POST /api/v1/auth/login` JWT exchange).
+In `local` profile (`-Dspring-boot.run.profiles=local`), `DataInitializer` seeds four synthetic accounts (`alice`, `bob`, `charlie`, `admin`) using `TRUSTGUARD_DEMO_PASSWORD` (or a generated ephemeral 24-character password printed to the local startup log—no hardcoded password literals exist in application or UI source code). Outside `local`/`test`, demo seeding is disabled unless `trustguard.demo.seed-enabled=true` and an explicit `TRUSTGUARD_DEMO_PASSWORD` (`>= 12` bytes) are supplied. In `frontend/` standalone offline mode, an ephemeral passphrase is stored per-session in `sessionStorage` (overridable at build time via `VITE_DEMO_PASSWORD`).
 
 ---
 
 ## 5. Key REST API Endpoints (`/api/v1`)
 
-| Endpoint | Purpose | Example Payload |
-| --- | --- | --- |
-| `POST /api/v1/auth/login` | Issue JWT bearer token | `{"username":"admin","password":"TrustGuard!Demo2026"}` |
-| `GET /api/v1/dashboard` | Live dashboard telemetry & metrics | — |
-| `GET /api/v1/users` / `GET /api/v1/devices` | List synthetic users & devices | — |
-| `POST /api/v1/devices/enrol` | Enroll or replace device with ML-KEM-768 + ML-DSA-65 | `{"ownerUsername":"alice","deviceName":"Alice Replacement"}` |
-| `POST /api/v1/devices/{id}/revoke` | Revoke device & propagate to 3 simulated nodes | `{"reason":"Lost laptop"}` |
-| `GET /api/v1/resources` / `POST /api/v1/access/check` | Policy check + optional ML-KEM-768 `protectedRead` | `{"sourceService":"portal","targetService":"vault","resourceKey":"brief-alice","action":"read"}` |
-| `POST /api/v1/keys/prepare` / `acknowledge` / `commit` | Quorum-gated key lifecycle (`gracePeriodSeconds`) | `{"keyAlias":"trustguard-data-key","gracePeriodSeconds":60}` |
-| `GET /api/v1/audit` / `POST /api/v1/audit/verify` | Hash-chained audit log & first-mismatch check | — |
-| `POST /api/v1/detection/evaluate` / `GET /api/v1/alerts` | Deterministic rule engine on 22 practice events | — |
-| `POST /api/v1/messages` / `POST /api/v1/messages/{id}/receive` | Ephemeral ML-KEM-768 + HKDF + AES-GCM + ML-DSA-65 | `{"recipientUsername":"bob","plaintext":"Hello Bob"}` |
-| `POST /api/v1/backups/create` / `verify` / `restore` | SHA-256 checksum snapshot & verified restore | — |
-| `POST /api/v1/sessions/run-tests` | Run 7 repeatable session & delivery checks | — |
+| Endpoint | Role / Scope | Purpose | Example Payload |
+| --- | --- | --- | --- |
+| `POST /api/v1/auth/login` | Public (rate-limited `(username, IP)` + IP spray) | Issue HS256 `typ=JWT` bearer token | `{"username":"admin","password":"<configured-passphrase>"}` |
+| `POST /api/v1/auth/logout` | Authenticated | Increment `tokenVersion` & invalidate JWT | — |
+| `GET /api/v1/dashboard` | Scoped (`ADMIN` global / `USER` caller) | Dashboard telemetry & metrics | — |
+| `GET /api/v1/users` / `GET /api/v1/users/recipients` | Scoped (`USER` sees self on `/users`, minimal usernames on `/recipients`) | User directory & messaging recipients | — |
+| `GET /api/v1/devices` / `enrol` / `{id}/revoke` | Scoped (`USER` replacement-only + bumps `tokenVersion`) | PQ device lifecycle & 3-node revocation | `{"ownerUsername":"alice","deviceName":"Alice Laptop","replacesDeviceId":1}` |
+| `GET /api/v1/resources` / `POST /api/v1/access/check` / `events` | Scoped (`USER` own resources/events) | Policy evaluation + FIPS 203 `protectedRead` | `{"sourceService":"portal","targetService":"vault","resourceKey":"brief-alice","action":"read"}` |
+| `GET /api/v1/nodes` / `GET/POST /api/v1/keys/**` | `ADMIN` only | Cluster nodes & quorum key rotation (`gracePeriodSeconds`) | `{"keyAlias":"trustguard-data-key","gracePeriodSeconds":60}` |
+| `GET /api/v1/audit` / `POST /api/v1/audit/verify` | `/audit` scoped; `/verify` `ADMIN` only | Hash-chained audit log & integrity check | — |
+| `GET /api/v1/detection/latest` / `POST /evaluate` / `GET /alerts` | `/evaluate` `ADMIN`; `/alerts` caller-scoped | Deterministic detector (`n=22`) & live alerts | — |
+| `GET/POST /api/v1/messages` / `{id}/receive` | Caller-scoped (sender/recipient) | Ephemeral `ML-KEM-768` + `HKDF` + `AES-GCM` + `ML-DSA-65` | `{"recipientUsername":"bob","plaintext":"Hello Bob"}` |
+| `GET/POST /api/v1/backups/**` | `ADMIN` only | SHA-256 + HMAC-SHA-256 verified snapshot & restore | — |
+| `GET/POST /api/v1/sessions/**` / `run-tests` | Caller-scoped; `/run-tests` `ADMIN` | Session open/close/resume & 7 verification checks | — |
+| `GET /api/v1/crypto/pqc-status` / `POST /verify-shor-resilience` | `/pqc-status` Auth; `/verify-shor-resilience` `ADMIN` | PQC algorithm inventory & live Shor-resistance checks | — |
 
 ---
 

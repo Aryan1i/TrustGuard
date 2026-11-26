@@ -18,6 +18,8 @@ import com.trustguard.repository.ResourceRepository;
 import com.trustguard.repository.RolePermissionRepository;
 import com.trustguard.repository.SimulatedNodeRepository;
 import com.trustguard.repository.UserRepository;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.ApplicationArguments;
 import org.springframework.boot.ApplicationRunner;
@@ -26,6 +28,7 @@ import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.security.SecureRandom;
 import java.time.Instant;
 import java.util.Arrays;
 import java.util.Base64;
@@ -34,7 +37,9 @@ import java.util.List;
 @Component
 public class DataInitializer implements ApplicationRunner {
 
-    public static final String DEFAULT_DEMO_PASSWORD = "TrustGuard!Demo2026";
+    private static final Logger log = LoggerFactory.getLogger(DataInitializer.class);
+    private static final String EPHEMERAL_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#%";
+    private static final int MIN_PROD_SEED_PASSWORD_LEN = 12;
 
     private final UserRepository userRepository;
     private final DeviceRepository deviceRepository;
@@ -67,7 +72,7 @@ public class DataInitializer implements ApplicationRunner {
             DetectionOrchestrationService detectionService,
             Environment environment,
             @Value("${trustguard.demo.seed-enabled:true}") boolean seedEnabled,
-            @Value("${TRUSTGUARD_DEMO_PASSWORD:TrustGuard!Demo2026}") String demoPassword
+            @Value("${trustguard.demo.password:${TRUSTGUARD_DEMO_PASSWORD:}}") String demoPassword
     ) {
         this.userRepository = userRepository;
         this.deviceRepository = deviceRepository;
@@ -89,10 +94,11 @@ public class DataInitializer implements ApplicationRunner {
     public void validateStartupConfiguration() {
         boolean isDevOrTest = environment != null && Arrays.stream(environment.getActiveProfiles())
                 .anyMatch(p -> "local".equalsIgnoreCase(p) || "test".equalsIgnoreCase(p));
-        if (!isDevOrTest && seedEnabled && DEFAULT_DEMO_PASSWORD.equals(demoPassword)) {
+        if (!isDevOrTest && seedEnabled
+                && (demoPassword == null || demoPassword.isBlank() || demoPassword.trim().length() < MIN_PROD_SEED_PASSWORD_LEN)) {
             throw new IllegalStateException(
-                    "Refusing to enable demo user seeding with default credentials outside local/test profiles; "
-                            + "disable trustguard.demo.seed-enabled or override TRUSTGUARD_DEMO_PASSWORD"
+                    "Refusing to seed identities outside local/test profiles without explicit "
+                            + "TRUSTGUARD_DEMO_PASSWORD (min " + MIN_PROD_SEED_PASSWORD_LEN + " chars) or trustguard.demo.seed-enabled=false"
             );
         }
     }
@@ -105,7 +111,8 @@ public class DataInitializer implements ApplicationRunner {
             return;
         }
 
-        String encodedPassword = passwordEncoder.encode(demoPassword);
+        String rawPassword = resolveEffectiveSeedPassword();
+        String encodedPassword = passwordEncoder.encode(rawPassword);
         UserEntity alice = saveUser("alice", "Alice (Synthetic User)", "alice@synthetic.trustguard.local", "USER", encodedPassword);
         UserEntity bob = saveUser("bob", "Bob (Synthetic User)", "bob@synthetic.trustguard.local", "USER", encodedPassword);
         UserEntity charlie = saveUser("charlie", "Charlie (Synthetic User)", "charlie@synthetic.trustguard.local", "USER", encodedPassword);
@@ -195,6 +202,20 @@ public class DataInitializer implements ApplicationRunner {
 
         // Evaluate 22-event practice dataset cleanly at startup (without labels in detector)
         detectionService.evaluatePracticeDataset();
+    }
+
+    private String resolveEffectiveSeedPassword() {
+        if (demoPassword != null && !demoPassword.isBlank()) {
+            return demoPassword;
+        }
+        SecureRandom random = new SecureRandom();
+        StringBuilder sb = new StringBuilder(24);
+        for (int i = 0; i < 24; i++) {
+            sb.append(EPHEMERAL_ALPHABET.charAt(random.nextInt(EPHEMERAL_ALPHABET.length())));
+        }
+        String generated = sb.toString();
+        log.info("Generated ephemeral local demo password for seeded synthetic users (set TRUSTGUARD_DEMO_PASSWORD to use a fixed local password): {}", generated);
+        return generated;
     }
 
     private UserEntity saveUser(String username, String displayName, String email, String role, String encodedPassword) {

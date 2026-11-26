@@ -304,6 +304,91 @@ class AdapterIntegrationTests(unittest.TestCase):
                 else:
                     os.environ["TRACK4_STATE_DIR"] = old_env
 
+    def test_fips203_rejects_classical_zero_and_out_of_range_kem_keys(self):
+        with tempfile.TemporaryDirectory(prefix="tg-fips203-") as state_dir:
+            rc, res, _, _ = self.invoke(
+                state_dir,
+                {
+                    "op": "setup",
+                    "owners": {"doc": "alice"},
+                    "contents": {"doc": "pqc-secret"},
+                    "disabled": [],
+                },
+            )
+            self.assertEqual(rc, 0)
+            self.assertTrue(res["ready"])
+
+            bad_keys = [
+                b"\x00" * 294,       # RSA-sized
+                b"\x00" * 1184,      # All-zero degenerate 1184B
+                b"\xff" * 1184,      # Out-of-range coefficients >= q=3329
+            ]
+            for i, key_bytes in enumerate(bad_keys):
+                rc, _, out, err = self.invoke(
+                    state_dir,
+                    {
+                        "op": "protected_read",
+                        "actor": "alice",
+                        "asset": "doc",
+                        "challenge": f"chal-bad-{i}",
+                        "public_key": base64.b64encode(key_bytes).decode("ascii"),
+                        "request_id": f"bad-kem-{i}",
+                    },
+                )
+                self.assertNotEqual(rc, 0)
+                self.assertEqual(out, b"")
+                self.assertIn(b"Request failed", err)
+
+    def test_log_injection_challenge_is_escaped_inside_single_valid_audit_entry(self):
+        with tempfile.TemporaryDirectory(prefix="tg-loginj-") as state_dir:
+            rc, res, _, _ = self.invoke(
+                state_dir,
+                {
+                    "op": "setup",
+                    "owners": {"doc": "alice"},
+                    "contents": {"doc": "pqc-secret"},
+                    "disabled": [],
+                },
+            )
+            self.assertEqual(rc, 0)
+            self.assertTrue(res["ready"])
+
+            pk, _ = ml_kem_768.generate_keypair()
+            malicious_challenge = 'chal\n{"seq":999,"actor":"root","decision":"forged"}|END\r\n'
+            req_id = "req-log-inj-1"
+            rc, res, _, _ = self.invoke(
+                state_dir,
+                {
+                    "op": "protected_read",
+                    "actor": "alice",
+                    "asset": "doc",
+                    "challenge": malicious_challenge,
+                    "public_key": base64.b64encode(pk).decode("ascii"),
+                    "request_id": req_id,
+                },
+            )
+            self.assertEqual(rc, 0)
+            self.assertEqual(res["decision"], "allow")
+
+            rc, audit_res, _, _ = self.invoke(
+                state_dir,
+                {"op": "audit", "request_id": req_id},
+            )
+            self.assertEqual(rc, 0)
+            self.assertEqual(audit_res["request_id"], req_id)
+            self.assertEqual(audit_res["decision"], "allow")
+            self.assertTrue(audit_res["chain_verified"])
+
+            raw_lines = (Path(state_dir) / team_app.STATE_FILENAME).read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(raw_lines), 1)
+            envelope = json.loads(raw_lines[0])
+            chain = envelope["payload"]["audit_chain"]
+            self.assertEqual(len(chain), 2)
+            self.assertEqual(chain[1]["request_id"], req_id)
+            self.assertEqual(chain[1]["actor"], "alice")
+            self.assertEqual(chain[1]["decision"], "allow")
+            self.assertTrue(all(entry["actor"] != "root" for entry in chain))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -26,6 +26,8 @@ export default function AccessMonitor({ session }) {
   const [requestedKeyVersion, setRequestedKeyVersion] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
+  const isAdmin = session?.role === 'ADMIN';
+
   const load = async () => {
     setLoading(true);
     setError('');
@@ -34,7 +36,7 @@ export default function AccessMonitor({ session }) {
         api.getAccessEvents(),
         api.getResources(),
         api.getDevices(),
-        api.getNodes(),
+        isAdmin ? api.getNodes() : Promise.resolve([]),
       ]);
       setEvents(ev);
       setResources(res);
@@ -55,7 +57,7 @@ export default function AccessMonitor({ session }) {
 
   useEffect(() => {
     load();
-  }, [session?.username]);
+  }, [isAdmin, session?.username]);
 
   const runSimulation = async (overrides = {}) => {
     setSubmitting(true);
@@ -84,7 +86,6 @@ export default function AccessMonitor({ session }) {
 
   if (loading && events.length === 0) return <LoadingState />;
 
-  const isAdmin = session?.role === 'ADMIN';
   const revokedDev = devices.find((d) => d.status === 'REVOKED');
   const allowCount = events.filter((e) => e.decision === 'ALLOW').length;
   const denyCount = events.filter((e) => e.decision === 'DENY').length;
@@ -260,7 +261,10 @@ export default function AccessMonitor({ session }) {
             <div className="field">
               <label>Enforcement Node</label>
               <select value={nodeCode} onChange={(e) => setNodeCode(e.target.value)}>
-                {nodes.map((n) => (
+                {(nodes.length > 0
+                  ? nodes
+                  : [{ nodeCode: 'node-alpha' }, { nodeCode: 'node-beta' }, { nodeCode: 'node-gamma' }]
+                ).map((n) => (
                   <option key={n.nodeCode} value={n.nodeCode}>
                     {n.nodeCode}
                   </option>

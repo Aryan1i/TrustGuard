@@ -84,7 +84,7 @@ public class AuthController {
             throw ex;
         }
 
-        authRateLimiter.recordSuccess(trimmedUsername);
+        authRateLimiter.recordSuccess(trimmedUsername, clientIp);
         UserEntity user = userRepository.findByUsername(trimmedUsername)
                 .orElseThrow(() -> new ResourceNotFoundException("User not found"));
         JwtService.TokenResult token = jwtService.generateToken(user.getUsername(), user.getRole(), user.getTokenVersion());

@@ -16,7 +16,13 @@ export default function Recovery({ session }) {
   const [notice, setNotice] = useState('');
   const [restoreTarget, setRestoreTarget] = useState(null);
 
+  const isAdmin = session?.role === 'ADMIN';
+
   const load = async (clearError = true) => {
+    if (!isAdmin) {
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     if (clearError) setError('');
     try {
@@ -31,7 +37,7 @@ export default function Recovery({ session }) {
 
   useEffect(() => {
     load();
-  }, []);
+  }, [isAdmin, session?.username]);
 
   const handleCreate = async () => {
     setBusy(true);
@@ -97,9 +103,21 @@ export default function Recovery({ session }) {
     }
   };
 
+  if (!isAdmin) {
+    return (
+      <div>
+        <div className="page-subheader">
+          <h2 className="page-subheader-title">Backup &amp; Recovery</h2>
+        </div>
+        <div className="banner banner-info">
+          Administrator role required to inspect, verify, or restore encrypted backup snapshots.
+        </div>
+      </div>
+    );
+  }
+
   if (loading && backups.length === 0) return <LoadingState />;
 
-  const isAdmin = session?.role === 'ADMIN';
   const verifiedCount = backups.filter((b) => b.verificationStatus === 'VERIFIED').length;
   const corruptedCount = backups.filter((b) => b.verificationStatus === 'CORRUPTED').length;
   const restoredCount = backups.filter((b) => b.restoreStatus === 'RESTORED').length;

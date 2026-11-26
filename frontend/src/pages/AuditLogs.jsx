@@ -30,7 +30,7 @@ export default function AuditLogs({ session }) {
 
   useEffect(() => {
     load();
-  }, []);
+  }, [session?.username, session?.role]);
 
   const handleVerify = async () => {
     setBusy(true);
@@ -93,11 +93,11 @@ export default function AuditLogs({ session }) {
       <div className="page-subheader">
         <h2 className="page-subheader-title">Audit Ledger</h2>
         <div className="flex-row">
-          <button type="button" className="btn btn-primary" disabled={busy} onClick={handleVerify}>
-            Verify Chain
-          </button>
           {isAdmin && (
             <>
+              <button type="button" className="btn btn-primary" disabled={busy} onClick={handleVerify}>
+                Verify Chain
+              </button>
               <button type="button" className="btn btn-danger" disabled={busy} onClick={handleSimulateTamper}>
                 Simulate Row Tamper
               </button>

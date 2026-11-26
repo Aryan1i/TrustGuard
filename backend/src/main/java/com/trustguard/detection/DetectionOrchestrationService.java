@@ -140,7 +140,10 @@ public class DetectionOrchestrationService {
     }
 
     public List<AlertDto> listAllAlerts() {
+        boolean admin = SecurityUtils.isAdmin();
+        String caller = admin ? null : SecurityUtils.currentUsername();
         return alertRepository.findAllByOrderByDetectedAtDesc().stream()
+                .filter(alert -> admin || caller.equals(alert.getActor()))
                 .map(this::toDto)
                 .toList();
     }

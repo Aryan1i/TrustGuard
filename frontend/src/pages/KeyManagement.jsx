@@ -18,7 +18,13 @@ export default function KeyManagement({ session }) {
   const [busy, setBusy] = useState(false);
   const [commitCandidate, setCommitCandidate] = useState(null);
 
+  const isAdmin = session?.role === 'ADMIN';
+
   const load = async (clearError = true) => {
+    if (!isAdmin) {
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     if (clearError) setError('');
     try {
@@ -33,7 +39,20 @@ export default function KeyManagement({ session }) {
 
   useEffect(() => {
     load();
-  }, []);
+  }, [isAdmin, session?.username]);
+
+  if (!isAdmin) {
+    return (
+      <div>
+        <div className="page-subheader">
+          <h2 className="page-subheader-title">Cluster Key Management</h2>
+        </div>
+        <div className="banner banner-info">
+          Administrator role required to inspect key versions, rotation epochs, and cluster quorum acknowledgements.
+        </div>
+      </div>
+    );
+  }
 
   const handlePrepare = async () => {
     setBusy(true);
@@ -108,7 +127,6 @@ export default function KeyManagement({ session }) {
 
   const versions = statusData?.versions || [];
   const nodes = statusData?.nodes || [];
-  const isAdmin = session?.role === 'ADMIN';
   const committedCount = versions.filter((v) => v.status === 'COMMITTED').length;
   const retiredCount = versions.filter((v) => v.status === 'RETIRED').length;
   const filteredVersions = versions.filter((v) => activeTab === 'ALL' || v.status === activeTab);

@@ -152,6 +152,27 @@ public class DeviceService {
                         "Self-service enrollment denied: accounts with revoked devices or without an active approved device require ADMIN approval"
                 );
             }
+            if (request.replacesDeviceId() == null) {
+                throw new AccessDeniedBusinessException(
+                        "REPLACEMENT_DEVICE_REQUIRED",
+                        "Non-admin self-service enrollment requires replacing an existing active caller-owned device (replacesDeviceId)"
+                );
+            }
+        }
+
+        DeviceEntity replacedDevice = null;
+        if (request.replacesDeviceId() != null) {
+            replacedDevice = deviceRepository.findById(request.replacesDeviceId())
+                    .orElseThrow(() -> new ResourceNotFoundException("Replaced device not found: " + request.replacesDeviceId()));
+            if (!replacedDevice.getOwner().getId().equals(owner.getId())) {
+                throw new AccessDeniedBusinessException("REPLACE_OWNER_MISMATCH", "Cannot replace another user's device");
+            }
+            if (!SecurityUtils.isAdmin() && !"ACTIVE".equals(replacedDevice.getStatus())) {
+                throw new AccessDeniedBusinessException(
+                        "REPLACE_DEVICE_NOT_ACTIVE",
+                        "Non-admin replacement requires an ACTIVE device"
+                );
+            }
         }
 
         String deviceUid = "dev-" + targetOwner + "-" + UUID.randomUUID().toString().substring(0, 6);
@@ -177,18 +198,17 @@ public class DeviceService {
         device.setLastSeenAt(now);
         device = deviceRepository.save(device);
 
-        if (request.replacesDeviceId() != null) {
-            DeviceEntity oldDevice = deviceRepository.findById(request.replacesDeviceId())
-                    .orElseThrow(() -> new ResourceNotFoundException("Replaced device not found: " + request.replacesDeviceId()));
-            if (!oldDevice.getOwner().getId().equals(owner.getId())) {
-                throw new AccessDeniedBusinessException("REPLACE_OWNER_MISMATCH", "Cannot replace another user's device");
+        if (replacedDevice != null) {
+            replacedDevice.setReplacedByDeviceId(device.getId());
+            if (!"REVOKED".equals(replacedDevice.getStatus())) {
+                replacedDevice.setStatus("REVOKED");
+                replacedDevice.setRevokedAt(now);
             }
-            oldDevice.setReplacedByDeviceId(device.getId());
-            if (!"REVOKED".equals(oldDevice.getStatus())) {
-                oldDevice.setStatus("REVOKED");
-                oldDevice.setRevokedAt(now);
+            deviceRepository.save(replacedDevice);
+            if (!SecurityUtils.isAdmin()) {
+                owner.setTokenVersion(owner.getTokenVersion() + 1L);
+                userRepository.save(owner);
             }
-            deviceRepository.save(oldDevice);
         }
 
         auditLogService.appendEvent(

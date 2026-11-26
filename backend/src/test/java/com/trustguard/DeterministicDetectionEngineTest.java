@@ -208,4 +208,79 @@ class DeterministicDetectionEngineTest {
         assertTrue(output.alerts().stream().anyMatch(a ->
                 "isolated_denied_request".equals(a.ruleName()) && a.eventIds().contains("adv-rev-late")));
     }
+
+    @Test
+    void detectsSlowAndLowLateralProbesNegativeForwardClockSkewServiceAccountPortalAbuseAndClearance() {
+        List<ApprovalChange> approvals = List.of(
+                new ApprovalChange(
+                        "change-200",
+                        "user-admin",
+                        "user-sam",
+                        "grant_role",
+                        "report-reader",
+                        List.of("reports"),
+                        Instant.parse("2026-01-15T10:00:00Z"),
+                        Instant.parse("2026-01-15T10:30:00Z"),
+                        null
+                ),
+                new ApprovalChange(
+                        "change-201",
+                        "user-admin",
+                        "user-remedy",
+                        "revoke_role",
+                        "operator",
+                        List.of(),
+                        null,
+                        null,
+                        Instant.parse("2026-01-15T10:15:00Z")
+                )
+        );
+
+        List<PracticeEvent> events = List.of(
+                // 1. Slow-and-low lateral movement: 3 probes spaced 15 minutes apart (> 300s) across 3 distinct target services
+                new PracticeEvent("slow-1", Instant.parse("2026-01-15T10:00:00Z"), Instant.parse("2026-01-15T10:00:00.1Z"),
+                        0, "user-slow", "portal", "billing", "read", "viewer", "viewer", "deny", "", "s-1", "c-1"),
+                new PracticeEvent("slow-2", Instant.parse("2026-01-15T10:15:00Z"), Instant.parse("2026-01-15T10:15:00.1Z"),
+                        0, "user-slow", "portal", "archive", "read", "viewer", "viewer", "deny", "", "s-2", "c-2"),
+                new PracticeEvent("slow-3", Instant.parse("2026-01-15T10:30:00Z"), Instant.parse("2026-01-15T10:30:00.1Z"),
+                        0, "user-slow", "portal", "vault", "read", "viewer", "viewer", "deny", "", "s-3", "c-3"),
+
+                // 2. Negative clock offset (-20_000ms) shifting 09:59:50Z forward to 10:00:10Z across grant validFromUtc (10:00:00Z)
+                new PracticeEvent("neg-clk", Instant.parse("2026-01-15T09:59:50Z"), Instant.parse("2026-01-15T10:00:15Z"),
+                        -20_000L, "user-sam", "portal", "reports", "read", "report-reader", "report-reader", "allow", "change-200", "s-sam", "c-sam"),
+
+                // 3. Service account abusing portal -> identity (tightened isKnownNormalEdge)
+                new PracticeEvent("svc-portal-id", Instant.parse("2026-01-15T10:05:00Z"), Instant.parse("2026-01-15T10:05:00.1Z"),
+                        0, "svc-scanner", "portal", "identity", "list_users", "service-reader", "service-reader", "allow", "", "s-svc", "c-svc"),
+
+                // 4. Unapproved role change cleared after chronologically later approved revoke_role
+                new PracticeEvent("rem-esc", Instant.parse("2026-01-15T10:10:00Z"), Instant.parse("2026-01-15T10:10:00.1Z"),
+                        0, "user-remedy", "admin-console", "identity", "role_change", "viewer", "operator", "success", "", "s-r1", "c-r1"),
+                new PracticeEvent("rem-allow-before", Instant.parse("2026-01-15T10:11:00Z"), Instant.parse("2026-01-15T10:11:00.1Z"),
+                        0, "user-remedy", "portal", "catalog", "read", "operator", "operator", "allow", "", "s-r1", "c-r2"),
+                new PracticeEvent("rem-revoke", Instant.parse("2026-01-15T10:15:00Z"), Instant.parse("2026-01-15T10:15:00.1Z"),
+                        0, "user-admin", "admin-console", "identity", "revoke_role", "operator", "viewer", "success", "change-201", "s-adm", "c-r3"),
+                new PracticeEvent("rem-allow-after", Instant.parse("2026-01-15T10:20:00Z"), Instant.parse("2026-01-15T10:20:00.1Z"),
+                        0, "user-remedy", "portal", "catalog", "read", "viewer", "viewer", "allow", "", "s-r2", "c-r4")
+        );
+
+        DeterministicDetectionEngine engine = new DeterministicDetectionEngine();
+        DeterministicDetectionEngine.EngineOutput output = engine.evaluatePracticeEvents(events, approvals);
+        Map<String, ClassifiedEventDto> byId = output.classifiedEvents().stream()
+                .collect(Collectors.toMap(ClassifiedEventDto::eventId, Function.identity()));
+
+        assertEquals("lateral_movement_candidate", byId.get("slow-1").predictedLabel());
+        assertEquals("lateral_movement_candidate", byId.get("slow-2").predictedLabel());
+        assertEquals("lateral_movement_candidate", byId.get("slow-3").predictedLabel());
+        assertTrue(output.alerts().stream().anyMatch(a ->
+                "lateral_movement_candidate".equals(a.ruleName())
+                        && a.eventIds().equals(List.of("slow-1", "slow-2", "slow-3"))));
+
+        assertEquals("suspicious_clock_offset", byId.get("neg-clk").predictedLabel());
+        assertEquals("unexpected_service_access", byId.get("svc-portal-id").predictedLabel());
+
+        assertEquals("review_after_role_change", byId.get("rem-allow-before").predictedLabel());
+        assertEquals("approved_change", byId.get("rem-revoke").predictedLabel());
+        assertEquals("routine", byId.get("rem-allow-after").predictedLabel());
+    }
 }

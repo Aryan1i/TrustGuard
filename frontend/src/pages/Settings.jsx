@@ -12,11 +12,16 @@ export default function Settings({ session, onOpenLogin }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
+  const isAdmin = session?.role === 'ADMIN';
+
   const load = async () => {
     setLoading(true);
     setError('');
     try {
-      const [u, n] = await Promise.all([api.getUsers(), api.getNodes()]);
+      const [u, n] = await Promise.all([
+        api.getUsers(),
+        isAdmin ? api.getNodes() : Promise.resolve([]),
+      ]);
       setUsers(u);
       setNodes(n);
     } catch (err) {
@@ -28,7 +33,7 @@ export default function Settings({ session, onOpenLogin }) {
 
   useEffect(() => {
     load();
-  }, [session?.username]);
+  }, [isAdmin, session?.username]);
 
   if (loading && users.length === 0) return <LoadingState />;
 
@@ -67,27 +72,31 @@ export default function Settings({ session, onOpenLogin }) {
           deltaTone="up"
           meta="Identity directory"
         />
-        <StatCard
-          label="Cluster Nodes"
-          value={nodes.length}
-          delta={`${onlineNodes} online`}
-          deltaTone={onlineNodes === nodes.length ? 'up' : 'down'}
-          meta="Distributed policy fleet"
-        />
-        <StatCard
-          label="Active Key Version"
-          value={`v${maxKeyVersion}`}
-          delta="Quorum enforced"
-          deltaTone="up"
-          meta="Cluster encryption key"
-        />
-        <StatCard
-          label="Revocation Epoch"
-          value={`v${maxRevVersion}`}
-          delta="Monotonic state"
-          deltaTone="neutral"
-          meta="Cluster revocation version"
-        />
+        {isAdmin && (
+          <>
+            <StatCard
+              label="Cluster Nodes"
+              value={nodes.length}
+              delta={`${onlineNodes} online`}
+              deltaTone={onlineNodes === nodes.length ? 'up' : 'down'}
+              meta="Distributed policy fleet"
+            />
+            <StatCard
+              label="Active Key Version"
+              value={`v${maxKeyVersion}`}
+              delta="Quorum enforced"
+              deltaTone="up"
+              meta="Cluster encryption key"
+            />
+            <StatCard
+              label="Revocation Epoch"
+              value={`v${maxRevVersion}`}
+              delta="Monotonic state"
+              deltaTone="neutral"
+              meta="Cluster revocation version"
+            />
+          </>
+        )}
       </div>
 
       <div className="grid grid-2 section-gap">

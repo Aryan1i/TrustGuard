@@ -70,8 +70,8 @@ public class SessionService {
                 ? deviceRepository.findById(peerDeviceId).orElseThrow(() -> new ResourceNotFoundException("Peer device not found"))
                 : actorDevice;
 
-        if ("REVOKED".equals(actorDevice.getStatus()) || "REVOKED".equals(peerDevice.getStatus())) {
-            throw new AccessDeniedBusinessException("DEVICE_REVOKED", "Cannot open session with a revoked device");
+        if (!"ACTIVE".equals(actorDevice.getStatus()) || !"ACTIVE".equals(peerDevice.getStatus())) {
+            throw new AccessDeniedBusinessException("DEVICE_REVOKED", "Cannot open session with an inactive or revoked device");
         }
 
         Instant now = Instant.now();
@@ -122,15 +122,15 @@ public class SessionService {
             sessionRepository.save(session);
             throw new AccessDeniedBusinessException("SESSION_EXPIRED", "Session expired before resumption");
         }
-        if (session.getDevice() != null && "REVOKED".equals(session.getDevice().getStatus())) {
+        if (session.getDevice() != null && !"ACTIVE".equals(session.getDevice().getStatus())) {
             session.setStatus("REVOKED");
             sessionRepository.save(session);
-            throw new AccessDeniedBusinessException("DEVICE_REVOKED", "Resumption denied: device was revoked");
+            throw new AccessDeniedBusinessException("DEVICE_REVOKED", "Resumption denied: device is not active");
         }
-        if (session.getPeerDevice() != null && "REVOKED".equals(session.getPeerDevice().getStatus())) {
+        if (session.getPeerDevice() != null && !"ACTIVE".equals(session.getPeerDevice().getStatus())) {
             session.setStatus("REVOKED");
             sessionRepository.save(session);
-            throw new AccessDeniedBusinessException("PEER_REVOKED", "Resumption denied: peer device was revoked");
+            throw new AccessDeniedBusinessException("PEER_REVOKED", "Resumption denied: peer device is not active");
         }
 
         session.setStatus("RESUMED");

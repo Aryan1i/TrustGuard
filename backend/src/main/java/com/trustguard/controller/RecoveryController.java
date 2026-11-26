@@ -9,6 +9,7 @@ import java.util.List;
 
 @RestController
 @RequestMapping("/api/v1/backups")
+@PreAuthorize("hasRole('ADMIN')")
 public class RecoveryController {
 
     private final BackupRecoveryService backupRecoveryService;

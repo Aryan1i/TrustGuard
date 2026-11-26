@@ -33,6 +33,8 @@ export default function Navbar({ title, session, onOpenLogin }) {
   const containerRef = useRef(null);
   const lastLoadedRef = useRef(0);
 
+  const isAdmin = session?.role === 'ADMIN';
+
   const loadSearchIndex = useCallback(async (force = false) => {
     const now = Date.now();
     if (!force && now - lastLoadedRef.current < 15000 && lastLoadedRef.current > 0) return;
@@ -42,7 +44,7 @@ export default function Navbar({ title, session, onOpenLogin }) {
         api.getDevices(),
         api.getUsers(),
         api.getAlerts(),
-        api.getRotationStatus(),
+        isAdmin ? api.getRotationStatus() : Promise.resolve(null),
         api.getAuditLogs(),
       ]);
       lastLoadedRef.current = Date.now();
@@ -57,7 +59,7 @@ export default function Navbar({ title, session, onOpenLogin }) {
     } finally {
       setLoadingIndex(false);
     }
-  }, []);
+  }, [isAdmin]);
 
   useEffect(() => {
     loadSearchIndex(true);

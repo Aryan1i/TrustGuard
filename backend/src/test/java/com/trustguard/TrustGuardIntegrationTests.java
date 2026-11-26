@@ -49,9 +49,9 @@ class TrustGuardIntegrationTests {
 
     @BeforeEach
     void authenticateDemoUsers() throws Exception {
-        adminToken = login("admin", "TrustGuard!Demo2026");
-        aliceToken = login("alice", "TrustGuard!Demo2026");
-        bobToken = login("bob", "TrustGuard!Demo2026");
+        adminToken = login("admin", "TgTestOnly#Seed!2026");
+        aliceToken = login("alice", "TgTestOnly#Seed!2026");
+        bobToken = login("bob", "TgTestOnly#Seed!2026");
     }
 
     private String login(String username, String password) throws Exception {

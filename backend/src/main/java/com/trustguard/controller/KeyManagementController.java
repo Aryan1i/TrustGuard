@@ -13,6 +13,7 @@ import java.util.Map;
 
 @RestController
 @RequestMapping("/api/v1/keys")
+@org.springframework.security.access.prepost.PreAuthorize("hasRole('ADMIN')")
 public class KeyManagementController {
 
     private final KeyManagementService keyManagementService;

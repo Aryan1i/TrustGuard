@@ -57,4 +57,26 @@ class PostQuantumCryptoServiceTest {
         crypto.zeroize(ikm, key);
         assertArrayEquals(new byte[32], key);
     }
+
+    @Test
+    void shorDefenseRejectsClassicalKeysAndOutOfRangeFips203Modulus() {
+        // Reject RSA/ECC sized keys and FIPS 203 invalid modulus/all-zero keys
+        assertThrows(IllegalArgumentException.class, () -> crypto.encapsulateMlKem768(new byte[294]));
+        assertThrows(IllegalArgumentException.class, () -> crypto.encapsulateMlKem768(new byte[65]));
+        assertThrows(IllegalArgumentException.class,
+                () -> crypto.encapsulateMlKem768(new byte[PostQuantumCryptoService.ML_KEM_768_PUBLIC_KEY_BYTES]));
+
+        byte[] invalidModulus = new byte[PostQuantumCryptoService.ML_KEM_768_PUBLIC_KEY_BYTES];
+        Arrays.fill(invalidModulus, (byte) 0xFF);
+        assertThrows(IllegalArgumentException.class, () -> crypto.encapsulateMlKem768(invalidModulus));
+
+        // Reject malformed ciphertext & classical signatures in ML-DSA-65
+        PostQuantumCryptoService.RawKeyPair kemKp = crypto.generateMlKem768KeyPair();
+        assertThrows(IllegalArgumentException.class, () -> crypto.decapsulateMlKem768(kemKp.privateKey(), new byte[128]));
+
+        PostQuantumCryptoService.RawKeyPair dsaKp = crypto.generateMlDsa65KeyPair();
+        byte[] msg = "shor-test".getBytes(StandardCharsets.UTF_8);
+        assertFalse(crypto.verifyMlDsa65(dsaKp.publicKey(), msg, new byte[256]));
+        assertFalse(crypto.verifyMlDsa65(new byte[294], msg, new byte[PostQuantumCryptoService.ML_DSA_65_SIGNATURE_BYTES]));
+    }
 }

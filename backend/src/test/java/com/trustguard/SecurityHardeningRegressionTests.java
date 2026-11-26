@@ -7,6 +7,7 @@ import com.trustguard.config.DataInitializer;
 import com.trustguard.crypto.PostQuantumCryptoService;
 import com.trustguard.crypto.ProtectedKeyStore;
 import com.trustguard.detection.DetectionOrchestrationService;
+import com.trustguard.dto.AuditVerifyResponse;
 import com.trustguard.entity.AuditLogEntity;
 import com.trustguard.entity.BackupRecordEntity;
 import com.trustguard.entity.DeviceEntity;
@@ -32,6 +33,7 @@ import com.trustguard.service.KeyManagementService;
 import com.trustguard.util.HashUtil;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.DefaultApplicationArguments;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
@@ -47,6 +49,8 @@ import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
@@ -138,6 +142,9 @@ class SecurityHardeningRegressionTests {
     @Autowired
     private DetectionOrchestrationService detectionService;
 
+    @Autowired
+    private JwtService jwtService;
+
     private String adminToken;
     private String aliceToken;
     private String bobToken;
@@ -145,10 +152,10 @@ class SecurityHardeningRegressionTests {
 
     @BeforeEach
     void setUpTokens() throws Exception {
-        adminToken = login("admin", "TrustGuard!Demo2026");
-        aliceToken = login("alice", "TrustGuard!Demo2026");
-        bobToken = login("bob", "TrustGuard!Demo2026");
-        charlieToken = login("charlie", "TrustGuard!Demo2026");
+        adminToken = login("admin", "TgTestOnly#Seed!2026");
+        aliceToken = login("alice", "TgTestOnly#Seed!2026");
+        bobToken = login("bob", "TgTestOnly#Seed!2026");
+        charlieToken = login("charlie", "TgTestOnly#Seed!2026");
     }
 
     private String login(String username, String password) throws Exception {
@@ -806,10 +813,24 @@ class SecurityHardeningRegressionTests {
                             .contentType(MediaType.APPLICATION_JSON)
                             .content(objectMapper.writeValueAsString(Map.of(
                                     "username", "alice",
-                                    "password", "TrustGuard!Demo2026"
+                                    "password", "TgTestOnly#Seed!2026"
                             ))))
                     .andExpect(status().isTooManyRequests())
                     .andExpect(jsonPath("$.code").value("AUTH_RATE_LIMITED"));
+
+            // Composite (username, clientIp) bucket: another IP can still sign in as alice without global DoS
+            mockMvc.perform(post("/api/v1/auth/login")
+                            .with(req -> {
+                                req.setRemoteAddr("198.51.100.99");
+                                return req;
+                            })
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content(objectMapper.writeValueAsString(Map.of(
+                                    "username", "alice",
+                                    "password", "TgTestOnly#Seed!2026"
+                            ))))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.username").value("alice"));
 
             // 2. Per-IP distributed username spraying threshold (25 failures across usernames from one IP -> 26th returns 429)
             for (int i = 0; i < 25; i++) {
@@ -834,7 +855,7 @@ class SecurityHardeningRegressionTests {
                             .contentType(MediaType.APPLICATION_JSON)
                             .content(objectMapper.writeValueAsString(Map.of(
                                     "username", "bob",
-                                    "password", "TrustGuard!Demo2026"
+                                    "password", "TgTestOnly#Seed!2026"
                             ))))
                     .andExpect(status().isTooManyRequests())
                     .andExpect(jsonPath("$.code").value("AUTH_RATE_LIMITED"));
@@ -929,17 +950,24 @@ class SecurityHardeningRegressionTests {
         JwtService strongSecretJwt = new JwtService(keyStore, prodEnv, "S".repeat(32), 3600);
         assertDoesNotThrow(strongSecretJwt::init);
 
-        DataInitializer unsafeProdSeeder = new DataInitializer(
+        DataInitializer emptyProdSeeder = new DataInitializer(
                 userRepository, deviceRepository, keyVersionRepository, nodeRepository, ackRepository,
                 resourceRepository, rolePermissionRepository, passwordEncoder, cryptoService, keyStore,
-                auditLogService, detectionService, prodEnv, true, DataInitializer.DEFAULT_DEMO_PASSWORD
+                auditLogService, detectionService, prodEnv, true, ""
         );
-        assertThrows(IllegalStateException.class, () -> unsafeProdSeeder.run(new DefaultApplicationArguments()));
+        assertThrows(IllegalStateException.class, () -> emptyProdSeeder.run(new DefaultApplicationArguments()));
+
+        DataInitializer shortProdSeeder = new DataInitializer(
+                userRepository, deviceRepository, keyVersionRepository, nodeRepository, ackRepository,
+                resourceRepository, rolePermissionRepository, passwordEncoder, cryptoService, keyStore,
+                auditLogService, detectionService, prodEnv, true, "short"
+        );
+        assertThrows(IllegalStateException.class, () -> shortProdSeeder.run(new DefaultApplicationArguments()));
 
         DataInitializer disabledProdSeeder = new DataInitializer(
                 userRepository, deviceRepository, keyVersionRepository, nodeRepository, ackRepository,
                 resourceRepository, rolePermissionRepository, passwordEncoder, cryptoService, keyStore,
-                auditLogService, detectionService, prodEnv, false, DataInitializer.DEFAULT_DEMO_PASSWORD
+                auditLogService, detectionService, prodEnv, false, ""
         );
         assertDoesNotThrow(() -> disabledProdSeeder.run(new DefaultApplicationArguments()));
     }
@@ -1013,5 +1041,574 @@ class SecurityHardeningRegressionTests {
                 .andExpect(header().string("X-Frame-Options", "DENY"))
                 .andExpect(header().string("Referrer-Policy", "no-referrer"))
                 .andExpect(header().string("Cache-Control", "no-store"));
+    }
+
+    @Test
+    void malformedJsonReturns400AndDuplicateRacesDeterministicallyReturn409WithZero500s() throws Exception {
+        // 1. Malformed JSON returns 400 BAD_REQUEST instead of 500
+        mockMvc.perform(post("/api/v1/access/check")
+                        .header("Authorization", "Bearer " + aliceToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{not-valid-json"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("BAD_REQUEST"));
+
+        // 2. Concurrent 12-thread duplicate requestId race produces strictly one 200 and eleven 409s
+        int threads = 12;
+        ExecutorService exec = Executors.newFixedThreadPool(threads);
+        CountDownLatch gate = new CountDownLatch(1);
+        String dupReqId = "race-junit-req-" + UUID.randomUUID().toString().substring(0, 8);
+        try {
+            List<Future<Integer>> results = new ArrayList<>();
+            String reqPayload = objectMapper.writeValueAsString(Map.of(
+                    "sourceService", "portal",
+                    "targetService", "vault",
+                    "resourceKey", "brief-alice",
+                    "action", "read",
+                    "requestId", dupReqId
+            ));
+            for (int i = 0; i < threads; i++) {
+                results.add(exec.submit(() -> {
+                    gate.await(5, TimeUnit.SECONDS);
+                    return mockMvc.perform(post("/api/v1/access/check")
+                                    .header("Authorization", "Bearer " + aliceToken)
+                                    .contentType(MediaType.APPLICATION_JSON)
+                                    .content(reqPayload))
+                            .andReturn().getResponse().getStatus();
+                }));
+            }
+            gate.countDown();
+            int okCount = 0;
+            int conflictCount = 0;
+            for (Future<Integer> f : results) {
+                int st = f.get(15, TimeUnit.SECONDS);
+                if (st == 200) okCount++;
+                else if (st == 409) conflictCount++;
+                else fail("Unexpected status during requestId race: " + st);
+            }
+            assertEquals(1, okCount);
+            assertEquals(threads - 1, conflictCount);
+
+            // 3. Concurrent 12-thread message receive race produces strictly one 200 and eleven 409s
+            String raceMsgId = "race-junit-msg-" + UUID.randomUUID().toString().substring(0, 8);
+            mockMvc.perform(post("/api/v1/messages")
+                            .header("Authorization", "Bearer " + aliceToken)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content(objectMapper.writeValueAsString(Map.of(
+                                    "recipientUsername", "bob",
+                                    "plaintext", "Concurrency receive test",
+                                    "customMessageId", raceMsgId
+                            ))))
+                    .andExpect(status().isOk());
+
+            CountDownLatch msgGate = new CountDownLatch(1);
+            List<Future<Integer>> msgResults = new ArrayList<>();
+            for (int i = 0; i < threads; i++) {
+                msgResults.add(exec.submit(() -> {
+                    msgGate.await(5, TimeUnit.SECONDS);
+                    return mockMvc.perform(post("/api/v1/messages/" + raceMsgId + "/receive")
+                                    .header("Authorization", "Bearer " + bobToken)
+                                    .contentType(MediaType.APPLICATION_JSON)
+                                    .content("{}"))
+                            .andReturn().getResponse().getStatus();
+                }));
+            }
+            msgGate.countDown();
+            int msgOk = 0;
+            int msgConflict = 0;
+            for (Future<Integer> f : msgResults) {
+                int st = f.get(15, TimeUnit.SECONDS);
+                if (st == 200) msgOk++;
+                else if (st == 409) msgConflict++;
+                else fail("Unexpected status during message receive race: " + st);
+            }
+            assertEquals(1, msgOk);
+            assertEquals(threads - 1, msgConflict);
+        } finally {
+            exec.shutdownNow();
+        }
+    }
+
+    @Test
+    void pqcPostureAndShorResilienceEnforceFips203ModulusAndJwtAlgorithmPinning() throws Exception {
+        // Out-of-modulus 1184B ML-KEM-768 key rejected early with 400
+        byte[] badModulusPk = new byte[PostQuantumCryptoService.ML_KEM_768_PUBLIC_KEY_BYTES];
+        java.util.Arrays.fill(badModulusPk, (byte) 0xFF);
+        mockMvc.perform(post("/api/v1/access/check")
+                        .header("Authorization", "Bearer " + aliceToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(Map.of(
+                                "sourceService", "portal",
+                                "targetService", "vault",
+                                "resourceKey", "brief-alice",
+                                "action", "read",
+                                "protectedRead", true,
+                                "challenge", "fips203-modulus-check",
+                                "publicKeyB64", Base64.getEncoder().encodeToString(badModulusPk)
+                        ))))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("BAD_REQUEST"));
+
+        // RS256 / alg=none downgrade token rejected even with signed HS256-looking payload
+        String[] aliceParts = aliceToken.split("\\.");
+        String rs256Header = Base64.getUrlEncoder().withoutPadding()
+                .encodeToString("{\"alg\":\"RS256\",\"typ\":\"JWT\"}".getBytes(StandardCharsets.UTF_8));
+        mockMvc.perform(get("/api/v1/auth/me")
+                        .header("Authorization", "Bearer " + rs256Header + "." + aliceParts[1] + "." + aliceParts[2]))
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.code").value("AUTH_REQUIRED"));
+
+        // PQC posture read allowed for USER; live Shor resilience self-test restricted to ADMIN
+        mockMvc.perform(get("/api/v1/crypto/pqc-status")
+                        .header("Authorization", "Bearer " + aliceToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.shorAlgorithmResistant").value(true))
+                .andExpect(jsonPath("$.classicalAsymmetricKeysDetected").value(0));
+
+        mockMvc.perform(post("/api/v1/crypto/verify-shor-resilience")
+                        .header("Authorization", "Bearer " + aliceToken))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.code").value("FORBIDDEN"));
+
+        mockMvc.perform(post("/api/v1/crypto/verify-shor-resilience")
+                        .header("Authorization", "Bearer " + adminToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.shorAlgorithmResistant").value(true))
+                .andExpect(jsonPath("$.verificationPassed").value(true))
+                .andExpect(jsonPath("$.checks.length()").value(5));
+    }
+
+    @Test
+    void logInjectionPayloadsAreContainedAndPreserveSingleValidAuditEntry() throws Exception {
+        long countBefore = auditLogRepository.count();
+
+        String forgedDeviceName = "Laptop\n{\"actor\":\"root\",\"action\":\"ADMIN_GRANTED\"}\r\n|end";
+        MvcResult devRes = mockMvc.perform(post("/api/v1/devices/enrol")
+                        .header("Authorization", "Bearer " + adminToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(Map.of(
+                                "ownerUsername", "alice",
+                                "deviceName", forgedDeviceName
+                        ))))
+                .andExpect(status().isOk())
+                .andReturn();
+        long devId = objectMapper.readTree(devRes.getResponse().getContentAsString()).get("id").asLong();
+        assertEquals(countBefore + 1, auditLogRepository.count());
+
+        String forgedReason = "Stolen\r\n|seq=9999|\"fake\":\"entry\"";
+        mockMvc.perform(post("/api/v1/devices/" + devId + "/revoke")
+                        .header("Authorization", "Bearer " + adminToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(Map.of("reason", forgedReason))))
+                .andExpect(status().isOk());
+        assertEquals(countBefore + 2, auditLogRepository.count());
+
+        PostQuantumCryptoService.RawKeyPair kp = cryptoService.generateMlKem768KeyPair();
+        // Device revocation bumped alice's tokenVersion; old token rejected with 401 and fresh login token works
+        mockMvc.perform(get("/api/v1/auth/me").header("Authorization", "Bearer " + aliceToken))
+                .andExpect(status().isUnauthorized());
+        String freshAliceToken = login("alice", "TgTestOnly#Seed!2026");
+        String forgedChallenge = "chal\n{\"actor\":\"root\",\"seqNumber\":999}|FORGED";
+        mockMvc.perform(post("/api/v1/access/check")
+                        .header("Authorization", "Bearer " + freshAliceToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(Map.of(
+                                "sourceService", "portal",
+                                "targetService", "vault",
+                                "resourceKey", "brief-alice",
+                                "action", "read",
+                                "protectedRead", true,
+                                "challenge", forgedChallenge,
+                                "publicKeyB64", Base64.getEncoder().encodeToString(kp.publicKey()),
+                                "requestId", "req-log-inj-access"
+                        ))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.decision").value("ALLOW"));
+        assertEquals(countBefore + 4, auditLogRepository.count());
+
+        List<AuditLogEntity> desc = auditLogRepository.findAllByOrderBySeqNumberDesc();
+        assertEquals("ACCESS_ALLOW", desc.get(0).getAction());
+        assertEquals("alice", desc.get(0).getActor());
+        assertEquals("AUTH_SIGN_IN", desc.get(1).getAction());
+        assertEquals("alice", desc.get(1).getActor());
+        assertEquals("DEVICE_REVOKED", desc.get(2).getAction());
+        assertEquals("admin", desc.get(2).getActor());
+        assertEquals("DEVICE_ENROLLED", desc.get(3).getAction());
+        assertEquals("admin", desc.get(3).getActor());
+        assertFalse(desc.subList(0, 4).stream().anyMatch(e -> "root".equals(e.getActor()) || "ADMIN_GRANTED".equals(e.getAction())));
+
+        AuditVerifyResponse verified = auditLogService.verifyChainReadOnly();
+        assertTrue(verified.valid());
+
+        String exportedJson = objectMapper.writeValueAsString(desc.subList(0, 4));
+        assertFalse(exportedJson.contains("\n"));
+        assertEquals(4, objectMapper.readTree(exportedJson).size());
+    }
+
+    @Test
+    void adminOnlyTelemetryAndAuditControlsReturn403ForStandardUsersWhileReadsAreScoped() throws Exception {
+        MvcResult bakRes = mockMvc.perform(post("/api/v1/backups/create")
+                        .header("Authorization", "Bearer " + adminToken))
+                .andExpect(status().isOk())
+                .andReturn();
+        String backupId = objectMapper.readTree(bakRes.getResponse().getContentAsString()).get("backupId").asText();
+
+        // Standard user blocked from global integrity verification, backups, nodes, and keys endpoints
+        mockMvc.perform(post("/api/v1/audit/verify").header("Authorization", "Bearer " + aliceToken))
+                .andExpect(status().isForbidden());
+        mockMvc.perform(get("/api/v1/backups").header("Authorization", "Bearer " + aliceToken))
+                .andExpect(status().isForbidden());
+        mockMvc.perform(post("/api/v1/backups/" + backupId + "/verify").header("Authorization", "Bearer " + aliceToken))
+                .andExpect(status().isForbidden());
+        mockMvc.perform(get("/api/v1/nodes").header("Authorization", "Bearer " + aliceToken))
+                .andExpect(status().isForbidden());
+        mockMvc.perform(get("/api/v1/keys").header("Authorization", "Bearer " + aliceToken))
+                .andExpect(status().isForbidden());
+        mockMvc.perform(get("/api/v1/keys/rotation-status").header("Authorization", "Bearer " + aliceToken))
+                .andExpect(status().isForbidden());
+
+        // Trigger isolated runtime activity + alert for Bob, and allowed activity for Alice
+        mockMvc.perform(post("/api/v1/access/check")
+                        .header("Authorization", "Bearer " + bobToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(Map.of(
+                                "sourceService", "portal",
+                                "targetService", "billing",
+                                "resourceKey", "ledger-bob",
+                                "action", "read"
+                        ))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.decision").value("DENY"));
+
+        mockMvc.perform(post("/api/v1/access/check")
+                        .header("Authorization", "Bearer " + aliceToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(Map.of(
+                                "sourceService", "portal",
+                                "targetService", "vault",
+                                "resourceKey", "brief-alice",
+                                "action", "read"
+                        ))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.decision").value("ALLOW"));
+
+        // Non-admin GET /audit strictly returns caller's own entries and omits global mismatch/hash metadata
+        MvcResult aliceAuditRes = mockMvc.perform(get("/api/v1/audit")
+                        .header("Authorization", "Bearer " + aliceToken))
+                .andExpect(status().isOk())
+                .andReturn();
+        JsonNode aliceAuditJson = objectMapper.readTree(aliceAuditRes.getResponse().getContentAsString());
+        assertFalse(aliceAuditJson.get("entries").isEmpty());
+        for (JsonNode entry : aliceAuditJson.get("entries")) {
+            assertEquals("alice", entry.get("actor").asText());
+        }
+        assertTrue(aliceAuditJson.get("latestVerification").get("expectedHash").isNull());
+        assertTrue(aliceAuditJson.get("latestVerification").get("actualHash").isNull());
+
+        // Non-admin GET /alerts never exposes Bob's alerts to Alice; ADMIN sees Bob's alerts
+        MvcResult aliceAlertsRes = mockMvc.perform(get("/api/v1/alerts")
+                        .header("Authorization", "Bearer " + aliceToken))
+                .andExpect(status().isOk())
+                .andReturn();
+        for (JsonNode a : objectMapper.readTree(aliceAlertsRes.getResponse().getContentAsString())) {
+            assertEquals("alice", a.get("actor").asText());
+        }
+
+        MvcResult adminAlertsRes = mockMvc.perform(get("/api/v1/alerts")
+                        .header("Authorization", "Bearer " + adminToken))
+                .andExpect(status().isOk())
+                .andReturn();
+        boolean adminSeesBob = false;
+        for (JsonNode a : objectMapper.readTree(adminAlertsRes.getResponse().getContentAsString())) {
+            if ("bob".equals(a.get("actor").asText())) {
+                adminSeesBob = true;
+                break;
+            }
+        }
+        assertTrue(adminSeesBob);
+
+        // Non-admin GET /dashboard returns strictly caller-scoped counts & recentEvents
+        MvcResult aliceDashRes = mockMvc.perform(get("/api/v1/dashboard")
+                        .header("Authorization", "Bearer " + aliceToken))
+                .andExpect(status().isOk())
+                .andReturn();
+        JsonNode aliceDash = objectMapper.readTree(aliceDashRes.getResponse().getContentAsString());
+        assertEquals(1L, aliceDash.get("activeUsers").asLong());
+        for (JsonNode ev : aliceDash.get("recentEvents")) {
+            assertEquals("alice", ev.get("actor").asText());
+        }
+
+        MvcResult adminDashRes = mockMvc.perform(get("/api/v1/dashboard")
+                        .header("Authorization", "Bearer " + adminToken))
+                .andExpect(status().isOk())
+                .andReturn();
+        JsonNode adminDash = objectMapper.readTree(adminDashRes.getResponse().getContentAsString());
+        assertTrue(adminDash.get("activeUsers").asLong() >= 4L);
+        assertTrue(aliceDash.get("auditEntryCount").asLong() < adminDash.get("auditEntryCount").asLong());
+    }
+
+    @Test
+    void nonAdminDeviceSelfEnrollmentRequiresActiveOwnedReplacementAndBumpsTokenVersion() throws Exception {
+        UserEntity user = new UserEntity();
+        user.setUsername("self-enrol-user");
+        user.setDisplayName("Self Enrol User");
+        user.setEmail("self-enrol@trustguard.local");
+        user.setRole("USER");
+        user.setPasswordHash(passwordEncoder.encode("Pass!2026"));
+        user.setActive(true);
+        userRepository.save(user);
+
+        MvcResult dev1Res = mockMvc.perform(post("/api/v1/devices/enrol")
+                        .header("Authorization", "Bearer " + adminToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(Map.of(
+                                "ownerUsername", "self-enrol-user",
+                                "deviceName", "Initial Active Laptop"
+                        ))))
+                .andExpect(status().isOk())
+                .andReturn();
+        long userDev1Id = objectMapper.readTree(dev1Res.getResponse().getContentAsString()).get("id").asLong();
+
+        DeviceEntity bobActive = deviceRepository.findFirstByOwnerUsernameAndStatusOrderByEnrolledAtDesc("bob", "ACTIVE")
+                .orElseThrow();
+        String userJwtBeforeReplace = login("self-enrol-user", "Pass!2026");
+
+        // 1. Self-enrolment without replacesDeviceId blocked
+        mockMvc.perform(post("/api/v1/devices/enrol")
+                        .header("Authorization", "Bearer " + userJwtBeforeReplace)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"deviceName\":\"Shadow Second Device\"}"))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.code").value("REPLACEMENT_DEVICE_REQUIRED"));
+
+        // 2. Self-enrolment replacing another user's active device blocked
+        mockMvc.perform(post("/api/v1/devices/enrol")
+                        .header("Authorization", "Bearer " + userJwtBeforeReplace)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(Map.of(
+                                "deviceName", "Cross Owner Replacement",
+                                "replacesDeviceId", bobActive.getId()
+                        ))))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.code").value("REPLACE_OWNER_MISMATCH"));
+
+        // 3. Valid replacement of caller's own ACTIVE device succeeds, revokes old device, and bumps tokenVersion
+        MvcResult replacedRes = mockMvc.perform(post("/api/v1/devices/enrol")
+                        .header("Authorization", "Bearer " + userJwtBeforeReplace)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(Map.of(
+                                "deviceName", "Replacement Work Laptop",
+                                "replacesDeviceId", userDev1Id
+                        ))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("ACTIVE"))
+                .andReturn();
+        long newDevId = objectMapper.readTree(replacedRes.getResponse().getContentAsString()).get("id").asLong();
+
+        DeviceEntity reloadedOld = deviceRepository.findById(userDev1Id).orElseThrow();
+        assertEquals("REVOKED", reloadedOld.getStatus());
+        assertEquals(newDevId, reloadedOld.getReplacedByDeviceId());
+
+        // Pre-replacement JWT is immediately invalidated
+        mockMvc.perform(get("/api/v1/auth/me")
+                        .header("Authorization", "Bearer " + userJwtBeforeReplace))
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.code").value("AUTH_REQUIRED"));
+
+        // Once a device is REVOKED on the account, further self-service enrolments require ADMIN approval
+        String freshJwt = login("self-enrol-user", "Pass!2026");
+        mockMvc.perform(post("/api/v1/devices/enrol")
+                        .header("Authorization", "Bearer " + freshJwt)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(Map.of(
+                                "deviceName", "Reuse Revoked Device",
+                                "replacesDeviceId", userDev1Id
+                        ))))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.code").value("ADMIN_APPROVAL_REQUIRED"));
+    }
+
+    @Test
+    void inactiveSenderOrRecipientAndStrictJwtClaimsAreRejected() throws Exception {
+        UserEntity sender = new UserEntity();
+        sender.setUsername("msg-sec-sender");
+        sender.setDisplayName("Msg Sender");
+        sender.setEmail("msg-sender@trustguard.local");
+        sender.setRole("USER");
+        sender.setPasswordHash(passwordEncoder.encode("Pass!2026"));
+        sender.setActive(true);
+        userRepository.save(sender);
+
+        UserEntity rcpt = new UserEntity();
+        rcpt.setUsername("msg-sec-rcpt");
+        rcpt.setDisplayName("Msg Recipient");
+        rcpt.setEmail("msg-rcpt@trustguard.local");
+        rcpt.setRole("USER");
+        rcpt.setPasswordHash(passwordEncoder.encode("Pass!2026"));
+        rcpt.setActive(true);
+        userRepository.save(rcpt);
+
+        long sDevId = objectMapper.readTree(mockMvc.perform(post("/api/v1/devices/enrol")
+                        .header("Authorization", "Bearer " + adminToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"ownerUsername\":\"msg-sec-sender\",\"deviceName\":\"Sender Phone\"}"))
+                .andExpect(status().isOk()).andReturn().getResponse().getContentAsString()).get("id").asLong();
+
+        long rDevId = objectMapper.readTree(mockMvc.perform(post("/api/v1/devices/enrol")
+                        .header("Authorization", "Bearer " + adminToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"ownerUsername\":\"msg-sec-rcpt\",\"deviceName\":\"Rcpt Phone\"}"))
+                .andExpect(status().isOk()).andReturn().getResponse().getContentAsString()).get("id").asLong();
+
+        String sJwt = login("msg-sec-sender", "Pass!2026");
+        String rJwt = login("msg-sec-rcpt", "Pass!2026");
+
+        String msgId1 = "msg-sender-rev-" + UUID.randomUUID().toString().substring(0, 8);
+        mockMvc.perform(post("/api/v1/messages")
+                        .header("Authorization", "Bearer " + sJwt)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(Map.of(
+                                "recipientUsername", "msg-sec-rcpt",
+                                "senderDeviceId", sDevId,
+                                "recipientDeviceId", rDevId,
+                                "plaintext", "Secret before sender revocation",
+                                "customMessageId", msgId1
+                        ))))
+                .andExpect(status().isOk());
+
+        // Prepare second message BEFORE disabling recipient, to test in-flight account deactivation
+        String msgId2 = "msg-rcpt-off-" + UUID.randomUUID().toString().substring(0, 8);
+        mockMvc.perform(post("/api/v1/messages")
+                        .header("Authorization", "Bearer " + sJwt)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(Map.of(
+                                "recipientUsername", "msg-sec-rcpt",
+                                "senderDeviceId", sDevId,
+                                "recipientDeviceId", rDevId,
+                                "plaintext", "Should not deliver after recipient deactivation",
+                                "customMessageId", msgId2
+                        ))))
+                .andExpect(status().isOk());
+
+        // Revoke sender device before recipient receives msgId1
+        mockMvc.perform(post("/api/v1/devices/" + sDevId + "/revoke")
+                        .header("Authorization", "Bearer " + adminToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"reason\":\"Sender compromised\"}"))
+                .andExpect(status().isOk());
+
+        mockMvc.perform(post("/api/v1/messages/" + msgId1 + "/receive")
+                        .header("Authorization", "Bearer " + rJwt)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{}"))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.code").value("SENDER_DEVICE_INACTIVE"));
+
+        // Inactive/revoked peer device cannot open a new session
+        mockMvc.perform(post("/api/v1/sessions/open")
+                        .header("Authorization", "Bearer " + rJwt)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(Map.of("peerDeviceId", sDevId))))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.code").value("DEVICE_REVOKED"));
+
+        // Reactivate sender device (new enrolled active device isn't sDevId, so test msgId2? Wait: msgId2 used sDevId, so enroll sDev2 and send msgId3 before deactivating recipient!)
+        long sDev2Id = objectMapper.readTree(mockMvc.perform(post("/api/v1/devices/enrol")
+                        .header("Authorization", "Bearer " + adminToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"ownerUsername\":\"msg-sec-sender\",\"deviceName\":\"Sender Phone 2\"}"))
+                .andExpect(status().isOk()).andReturn().getResponse().getContentAsString()).get("id").asLong();
+        String sJwt2 = login("msg-sec-sender", "Pass!2026");
+
+        String msgId3 = "msg-rcpt-off3-" + UUID.randomUUID().toString().substring(0, 8);
+        mockMvc.perform(post("/api/v1/messages")
+                        .header("Authorization", "Bearer " + sJwt2)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(Map.of(
+                                "recipientUsername", "msg-sec-rcpt",
+                                "senderDeviceId", sDev2Id,
+                                "recipientDeviceId", rDevId,
+                                "plaintext", "Blocked when recipient deactivated",
+                                "customMessageId", msgId3
+                        ))))
+                .andExpect(status().isOk());
+
+        // Deactivate recipient user -> receive blocked with RECIPIENT_INACTIVE even via admin
+        UserEntity deactivated = userRepository.findByUsername("msg-sec-rcpt").orElseThrow();
+        deactivated.setActive(false);
+        userRepository.save(deactivated);
+
+        mockMvc.perform(post("/api/v1/messages/" + msgId3 + "/receive")
+                        .header("Authorization", "Bearer " + adminToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"claimedRecipientUsername\":\"msg-sec-rcpt\"}"))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.code").value("RECIPIENT_INACTIVE"));
+
+        // Strict JWT checks: missing typ, wrong typ, and future iat (> +60s) rejected even with valid HMAC
+        byte[] hmacKey = keyStore.getOrCreateJwtSigningSecret("");
+        Base64.Encoder urlEnc = Base64.getUrlEncoder().withoutPadding();
+        long nowSec = Instant.now().getEpochSecond();
+
+        String validPayload = urlEnc.encodeToString(objectMapper.writeValueAsBytes(Map.of(
+                "sub", "alice", "role", "USER", "tv", 0, "iat", nowSec, "exp", nowSec + 3600
+        )));
+        String missingTypHdr = urlEnc.encodeToString("{\"alg\":\"HS256\"}".getBytes(StandardCharsets.UTF_8));
+        String wrongTypHdr = urlEnc.encodeToString("{\"alg\":\"HS256\",\"typ\":\"at+jwt\"}".getBytes(StandardCharsets.UTF_8));
+        String okHdr = urlEnc.encodeToString("{\"alg\":\"HS256\",\"typ\":\"JWT\"}".getBytes(StandardCharsets.UTF_8));
+        String futurePayload = urlEnc.encodeToString(objectMapper.writeValueAsBytes(Map.of(
+                "sub", "alice", "role", "USER", "tv", 0, "iat", nowSec + 600, "exp", nowSec + 3600
+        )));
+
+        String tokNoTyp = signRawJwt(hmacKey, urlEnc, missingTypHdr, validPayload);
+        String tokWrongTyp = signRawJwt(hmacKey, urlEnc, wrongTypHdr, validPayload);
+        String tokFutureIat = signRawJwt(hmacKey, urlEnc, okHdr, futurePayload);
+
+        assertTrue(jwtService.verifyToken(tokNoTyp).isEmpty());
+        assertTrue(jwtService.verifyToken(tokWrongTyp).isEmpty());
+        assertTrue(jwtService.verifyToken(tokFutureIat).isEmpty());
+
+        mockMvc.perform(get("/api/v1/auth/me").header("Authorization", "Bearer " + tokNoTyp))
+                .andExpect(status().isUnauthorized());
+        mockMvc.perform(get("/api/v1/auth/me").header("Authorization", "Bearer " + tokWrongTyp))
+                .andExpect(status().isUnauthorized());
+        mockMvc.perform(get("/api/v1/auth/me").header("Authorization", "Bearer " + tokFutureIat))
+                .andExpect(status().isUnauthorized());
+    }
+
+    private String signRawJwt(byte[] hmacKey, Base64.Encoder urlEnc, String headerB64, String payloadB64) {
+        String signingInput = headerB64 + "." + payloadB64;
+        String sigHex = HashUtil.hmacSha256Hex(hmacKey, signingInput.getBytes(StandardCharsets.UTF_8));
+        return signingInput + "." + urlEnc.encodeToString(sigHex.getBytes(StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void protectedKeyStoreEncryptsAtRestWithMasterKeyAndRequiresItInProd(@TempDir Path tempKsDir) throws Exception {
+        Path ksPath = tempKsDir.resolve("prod-keystore.json");
+        MockEnvironment prodEnv = new MockEnvironment();
+        prodEnv.setActiveProfiles("prod");
+
+        ProtectedKeyStore missingMaster = new ProtectedKeyStore(ksPath.toString(), prodEnv, "");
+        assertThrows(IllegalStateException.class, missingMaster::init);
+
+        String masterKey = "ProdMasterKey32BytesMinForAesGcm!";
+        ProtectedKeyStore prodKs = new ProtectedKeyStore(ksPath.toString(), prodEnv, masterKey);
+        prodKs.init();
+        assertTrue(prodKs.isMasterKeyEncryptionActive());
+
+        byte[] rawSecret = "ml-dsa-private-wrapping-key-material-001".getBytes(StandardCharsets.UTF_8);
+        String ref = prodKs.storeSecret("wrap-key-1", rawSecret);
+
+        String rawFileText = Files.readString(ksPath, StandardCharsets.UTF_8);
+        assertTrue(rawFileText.contains("gcm-v1:"));
+        assertFalse(rawFileText.contains(Base64.getEncoder().encodeToString(rawSecret)));
+
+        ProtectedKeyStore reloadedOk = new ProtectedKeyStore(ksPath.toString(), prodEnv, masterKey);
+        reloadedOk.init();
+        assertArrayEquals(rawSecret, reloadedOk.loadSecret(ref));
+
+        ProtectedKeyStore wrongMaster = new ProtectedKeyStore(ksPath.toString(), prodEnv, "WrongMasterKey32BytesForAesGcmTest!");
+        wrongMaster.init();
+        assertThrows(IllegalStateException.class, () -> wrongMaster.loadSecret(ref));
     }
 }
