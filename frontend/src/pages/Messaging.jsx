@@ -15,7 +15,7 @@ export default function Messaging({ session }) {
   const [deliveryResult, setDeliveryResult] = useState(null);
 
   const [recipientUsername, setRecipientUsername] = useState('bob');
-  const [plaintext, setPlaintext] = useState('Post-quantum session telemetry confirmed.');
+  const [plaintext, setPlaintext] = useState('Secure device channel status verified.');
   const [tamperRecipient, setTamperRecipient] = useState(false);
   const [tamperCiphertext, setTamperCiphertext] = useState(false);
 
@@ -112,9 +112,9 @@ export default function Messaging({ session }) {
         <div className="card">
           <div className="card-header">
             <div>
-              <h2 className="card-title">Send Post-Quantum Encrypted Message</h2>
+              <h2 className="card-title">Send Encrypted Message</h2>
               <p className="card-subtitle">
-                Ephemeral ML-KEM-768 + HKDF-SHA-256 + AES-256-GCM (AAD recipient-bound) + ML-DSA-65 signature.
+                End-to-end encrypted device messaging with recipient binding and forward secrecy.
               </p>
             </div>
           </div>
@@ -122,7 +122,7 @@ export default function Messaging({ session }) {
           <form onSubmit={handleSend}>
             <div className="form-grid" style={{ marginBottom: '12px' }}>
               <div className="field">
-                <label>Sender (Authenticated)</label>
+                <label>Sender</label>
                 <input value={session?.username || ''} disabled />
               </div>
               <div className="field">
@@ -147,7 +147,7 @@ export default function Messaging({ session }) {
                   checked={tamperRecipient}
                   onChange={(e) => setTamperRecipient(e.target.checked)}
                 />
-                Simulate AAD Recipient Tamper
+                Test Recipient Mismatch
               </label>
               <label className="flex-row">
                 <input
@@ -155,11 +155,11 @@ export default function Messaging({ session }) {
                   checked={tamperCiphertext}
                   onChange={(e) => setTamperCiphertext(e.target.checked)}
                 />
-                Simulate Ciphertext Tamper
+                Test Altered Ciphertext
               </label>
             </div>
             <button type="submit" className="btn btn-primary" disabled={busy}>
-              {busy ? 'Encrypting & Signing...' : 'Send Protected Message'}
+              {busy ? 'Encrypting...' : 'Send Protected Message'}
             </button>
           </form>
         </div>
@@ -167,22 +167,22 @@ export default function Messaging({ session }) {
         <div className="card">
           <div className="card-header">
             <div>
-              <h2 className="card-title">Session & Delivery Verification Suite</h2>
-              <p className="card-subtitle">Repeatable checks for replay, recipient binding, forward secrecy, resumption, and reordering.</p>
+              <h2 className="card-title">Session & Delivery Checks</h2>
+              <p className="card-subtitle">Verifies replay blocking, recipient binding, key erasure, resumption, and reordering.</p>
             </div>
             <button type="button" className="btn btn-primary btn-sm" disabled={busy} onClick={handleRunSuite}>
-              Run 7 Verification Tests
+              Run Delivery Checks
             </button>
           </div>
           <DataTable
             rowKey={(r) => r.testName}
             rows={suiteResults}
-            emptyTitle="Suite not executed yet"
-            emptyMessage="Click 'Run 7 Verification Tests' to run repeatable live crypto & delivery assertions."
+            emptyTitle="Checks not run yet"
+            emptyMessage="Click 'Run Delivery Checks' to verify replay protection, recipient binding, and session resumption."
             columns={[
-              { key: 'testName', header: 'Test Case', render: (r) => <strong>{r.testName}</strong> },
+              { key: 'testName', header: 'Check', render: (r) => <strong>{r.testName}</strong> },
               { key: 'status', header: 'Result', render: (r) => <StatusBadge status={r.status} /> },
-              { key: 'detail', header: 'Observed Outcome & Assumptions' },
+              { key: 'detail', header: 'Observed Outcome' },
             ]}
           />
         </div>
@@ -199,12 +199,11 @@ export default function Messaging({ session }) {
             { key: 'messageId', header: 'Message ID', render: (m) => <span className="mono">{m.messageId}</span> },
             { key: 'senderUsername', header: 'Sender', render: (m) => <strong>{m.senderUsername}</strong> },
             { key: 'recipientUsername', header: 'Intended Recipient', render: (m) => <strong>{m.recipientUsername}</strong> },
-            { key: 'algorithm', header: 'Algorithms', render: (m) => <span style={{ fontSize: '12px' }}>{m.algorithm} / {m.signatureAlgorithm}</span> },
             { key: 'status', header: 'Status', render: (m) => <StatusBadge status={m.status} /> },
             { key: 'verificationOutcome', header: 'Verification', render: (m) => <span className="mono">{m.verificationOutcome}</span> },
             {
               key: 'forwardSecrecyErased',
-              header: 'Ephemeral Erased',
+              header: 'Key Erased',
               render: (m) => <StatusBadge status={m.forwardSecrecyErased ? 'YES' : 'NO'} variant={m.forwardSecrecyErased ? 'success' : 'warning'} />,
             },
             {
@@ -222,7 +221,7 @@ export default function Messaging({ session }) {
 
       <div className="card">
         <div className="card-header">
-          <h2 className="card-title">Peer-Bound Sessions ({sessions.length})</h2>
+          <h2 className="card-title">Active Sessions ({sessions.length})</h2>
           <button
             type="button"
             className="btn btn-secondary btn-sm"
@@ -281,7 +280,7 @@ export default function Messaging({ session }) {
                         }
                       }}
                     >
-                      Resume (Policy Check)
+                      Resume Session
                     </button>
                   ) : null}
                 </div>

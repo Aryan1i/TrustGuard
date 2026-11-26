@@ -242,8 +242,8 @@ export default function KeyManagement({ session }) {
         <div className="card">
           <div className="card-header">
             <div>
-              <h2 className="card-title">Simulated Nodes & Failure Injection</h2>
-              <p className="card-subtitle">Toggle a node to fail acknowledgements to verify commit blocking.</p>
+              <h2 className="card-title">Cluster Nodes & Fault Testing</h2>
+              <p className="card-subtitle">Toggle a node acknowledgement fault to verify quorum commit protection.</p>
             </div>
           </div>
           <DataTable

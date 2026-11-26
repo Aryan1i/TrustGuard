@@ -2,46 +2,28 @@ import React, { useState } from 'react';
 import { NavLink } from 'react-router-dom';
 
 export const MODULES = [
-  { to: '/', label: 'Dashboard', category: 'Security', sub: 'Core • Live Posture' },
+  { to: '/', label: 'Dashboard', category: 'Security', sub: 'Overview • Live Posture' },
   { to: '/devices', label: 'Devices', category: 'Security', sub: 'Identity • Revocation' },
-  { to: '/keys', label: 'Key Management', category: 'Security', sub: 'ML-KEM • Quorum' },
+  { to: '/keys', label: 'Key Management', category: 'Security', sub: 'Lifecycle • Quorum' },
   { to: '/access', label: 'Access Monitor', category: 'Security', sub: 'Zero-Trust • Policy' },
-  { to: '/threats', label: 'Threat Detection', category: 'Security', sub: '22 Events • Rules' },
-  { to: '/audit', label: 'Audit Logs', category: 'Ops', sub: 'SHA-256 • Hash Chain' },
-  { to: '/messaging', label: 'Secure Messaging', category: 'Ops', sub: 'E2EE • Forward Secrecy' },
-  { to: '/recovery', label: 'Backup & Recovery', category: 'Ops', sub: 'Checksums • Restore' },
-  { to: '/settings', label: 'Settings', category: 'Ops', sub: 'Nodes • Boundaries' },
+  { to: '/threats', label: 'Threat Detection', category: 'Security', sub: 'Rules • Security Alerts' },
+  { to: '/audit', label: 'Audit Logs', category: 'Ops', sub: 'Integrity • Verification' },
+  { to: '/messaging', label: 'Secure Messaging', category: 'Ops', sub: 'Encrypted • Channels' },
+  { to: '/recovery', label: 'Backup & Recovery', category: 'Ops', sub: 'Snapshots • Restore' },
+  { to: '/settings', label: 'Settings', category: 'Ops', sub: 'Nodes • Configuration' },
 ];
 
 function RailIcon({ path }) {
   const icons = {
-    '/': (
-      <path d="M4 4h7v7H4V4zm9 0h7v7h-7V4zM4 13h7v7H4v-7zm9 0h7v7h-7v-7z" />
-    ),
-    '/devices': (
-      <path d="M4 6h16v10H4V6zm6 12h4m-6 2h8" />
-    ),
-    '/keys': (
-      <path d="M15 7a4 4 0 10-3.87 5H6v3h3v3h3v-2.13A4 4 0 0015 7z" />
-    ),
-    '/access': (
-      <path d="M12 2l7 3.5V11c0 5-3.3 9.3-7 11-3.7-1.7-7-6-7-11V5.5L12 2z" />
-    ),
-    '/threats': (
-      <path d="M12 9v4m0 4h.01M10.3 3.9L2.8 17a2 2 0 001.7 3h15a2 2 0 001.7-3L13.7 3.9a2 2 0 00-3.4 0z" />
-    ),
-    '/audit': (
-      <path d="M7 3h10l4 4v14H3V3h4zm0 6h10m-10 4h10m-10 4h6" />
-    ),
-    '/messaging': (
-      <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2v10z" />
-    ),
-    '/recovery': (
-      <path d="M3 12a9 9 0 103-6.7L3 8m0-5v5h5" />
-    ),
-    '/settings': (
-      <path d="M12 15a3 3 0 100-6 3 3 0 000 6zm7.4-3a7.4 7.4 0 00-.1-1l2-1.5-2-3.5-2.3.9a7.7 7.7 0 00-1.7-1L15 3h-6l-.3 2.9a7.7 7.7 0 00-1.7 1L4.7 6l-2 3.5 2 1.5a7.4 7.4 0 000 2l-2 1.5 2 3.5 2.3-.9c.5.4 1.1.8 1.7 1L9 21h6l.3-2.9c.6-.2 1.2-.6 1.7-1l2.3.9 2-3.5-2-1.5c.1-.3.1-.7.1-1z" />
-    ),
+    '/': <path d="M4 4h7v7H4V4zm9 0h7v7h-7V4zM4 13h7v7H4v-7zm9 0h7v7h-7v-7z" />,
+    '/devices': <path d="M4 6h16v10H4V6zm6 12h4m-6 2h8" />,
+    '/keys': <path d="M15 7a4 4 0 10-3.87 5H6v3h3v3h3v-2.13A4 4 0 0015 7z" />,
+    '/access': <path d="M12 2l7 3.5V11c0 5-3.3 9.3-7 11-3.7-1.7-7-6-7-11V5.5L12 2z" />,
+    '/threats': <path d="M12 9v4m0 4h.01M10.3 3.9L2.8 17a2 2 0 001.7 3h15a2 2 0 001.7-3L13.7 3.9a2 2 0 00-3.4 0z" />,
+    '/audit': <path d="M7 3h10l4 4v14H3V3h4zm0 6h10m-10 4h10m-10 4h6" />,
+    '/messaging': <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2v10z" />,
+    '/recovery': <path d="M3 12a9 9 0 103-6.7L3 8m0-5v5h5" />,
+    '/settings': <path d="M12 15a3 3 0 100-6 3 3 0 000 6zm7.4-3a7.4 7.4 0 00-.1-1l2-1.5-2-3.5-2.3.9a7.7 7.7 0 00-1.7-1L15 3h-6l-.3 2.9a7.7 7.7 0 00-1.7 1L4.7 6l-2 3.5 2 1.5a7.4 7.4 0 000 2l-2 1.5 2 3.5 2.3-.9c.5.4 1.1.8 1.7 1L9 21h6l.3-2.9c.6-.2 1.2-.6 1.7-1l2.3.9 2-3.5-2-1.5c.1-.3.1-.7.1-1z" />,
   };
 
   return (
@@ -89,7 +71,7 @@ export default function Sidebar({ session, onOpenLogin }) {
           <button
             type="button"
             className="avatar-circle"
-            title={`Signed in as ${session?.username || 'guest'} (click to switch)`}
+            title={`Signed in as ${session?.username || 'user'}`}
             onClick={onOpenLogin}
           >
             {(session?.username || 'TG').slice(0, 2).toUpperCase()}

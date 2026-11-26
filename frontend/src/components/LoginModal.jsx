@@ -1,15 +1,14 @@
 import React, { useState } from 'react';
 import { api, saveSession } from '../api';
-import StatusBadge from './StatusBadge';
 
-const DEMO_USERS = [
-  { username: 'admin', role: 'ADMIN', label: 'Admin (Operator)' },
-  { username: 'alice', role: 'USER', label: 'Alice (Owner)' },
-  { username: 'bob', role: 'USER', label: 'Bob (Owner)' },
-  { username: 'charlie', role: 'USER', label: 'Charlie (Owner)' },
+const QUICK_ACCOUNTS = [
+  { username: 'admin', label: 'Admin (Operator)' },
+  { username: 'alice', label: 'Alice (Owner)' },
+  { username: 'bob', label: 'Bob (Owner)' },
+  { username: 'charlie', label: 'Charlie (Owner)' },
 ];
 
-export default function LoginModal({ open, onClose, onAuthenticated, standalone = false, runtimeMode = 'checking' }) {
+export default function LoginModal({ open, onClose, onAuthenticated, standalone = false }) {
   const [username, setUsername] = useState('admin');
   const [password, setPassword] = useState('TrustGuard!Demo2026');
   const [loading, setLoading] = useState(false);
@@ -34,29 +33,24 @@ export default function LoginModal({ open, onClose, onAuthenticated, standalone 
 
   const formContent = (
     <>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-          <div className="rail-logo" style={{ marginBottom: 0 }}>
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
-              <path d="M12 2L4 5.5V11.5C4 16.8 7.4 21.5 12 23C16.6 21.5 20 16.8 20 11.5V5.5L12 2Z" stroke="#FFFFFF" strokeWidth="2" />
-              <path d="M9 12.2L11 14.2L15.5 9.7" stroke="#FFFFFF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-            </svg>
-          </div>
-          <div>
-            <h2 style={{ margin: 0, fontSize: '18px' }}>TrustGuard Sign In</h2>
-            <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
-              Track 4 · Identity & Access Console
-            </div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '12px' }}>
+        <div className="rail-logo" style={{ marginBottom: 0 }}>
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
+            <path d="M12 2L4 5.5V11.5C4 16.8 7.4 21.5 12 23C16.6 21.5 20 16.8 20 11.5V5.5L12 2Z" stroke="#FFFFFF" strokeWidth="2" />
+            <path d="M9 12.2L11 14.2L15.5 9.7" stroke="#FFFFFF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        </div>
+        <div>
+          <h2 style={{ margin: 0, fontSize: '18px' }}>TrustGuard Sign In</h2>
+          <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
+            Identity & Security Operations Console
           </div>
         </div>
-        <StatusBadge
-          status={runtimeMode === 'backend' ? 'Spring Boot' : 'Standalone Edge'}
-          variant={runtimeMode === 'backend' ? 'success' : 'lavender'}
-        />
       </div>
 
       <div className="banner banner-info" style={{ fontSize: '12px' }}>
-        Synthetic hackathon identities only. Password: <span className="mono">TrustGuard!Demo2026</span>
+        Sign in to manage devices, key lifecycle, access policies, messaging, and alerts. Default password:{' '}
+        <span className="mono">TrustGuard!Demo2026</span>
       </div>
 
       {error && <div className="banner banner-danger">{error}</div>}
@@ -77,7 +71,7 @@ export default function LoginModal({ open, onClose, onAuthenticated, standalone 
           />
         </div>
         <div className="field" style={{ marginBottom: '14px' }}>
-          <label htmlFor="tg-password">Synthetic Demo Password</label>
+          <label htmlFor="tg-password">Password</label>
           <input
             id="tg-password"
             type="password"
@@ -93,17 +87,17 @@ export default function LoginModal({ open, onClose, onAuthenticated, standalone 
             </button>
           )}
           <button type="submit" className="btn btn-primary" style={{ flex: 1 }} disabled={loading}>
-            {loading ? 'Authenticating...' : 'Sign In'}
+            {loading ? 'Signing in...' : 'Sign In'}
           </button>
         </div>
       </form>
 
       <div style={{ borderTop: '1px solid var(--border-color)', paddingTop: '12px' }}>
         <div style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '8px' }}>
-          Quick Authenticate Synthetic User:
+          Quick Sign-In:
         </div>
         <div className="flex-row">
-          {DEMO_USERS.map((u) => (
+          {QUICK_ACCOUNTS.map((u) => (
             <button
               key={u.username}
               type="button"

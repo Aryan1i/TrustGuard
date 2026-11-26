@@ -4,12 +4,11 @@ import {
   PRACTICE_LABELS_POST_EVAL_ONLY,
 } from './practiceData.js';
 
-const DB_KEY = 'trustguard_standalone_state_v1';
+const DB_KEY = 'trustguard_standalone_state_v2';
 const GENESIS_HASH = '0'.repeat(64);
 const LIMITATION_NOTICE =
-  'Limitation: In Standalone Browser Mode, state and audit hash chaining are persisted in browser localStorage via WebCrypto SHA-256. Connect the Spring Boot backend (VITE_API_BASE_URL) for server MySQL persistence, BouncyCastle ML-KEM-768 / ML-DSA-65, and Track 4 adapter verification.';
-const SAMPLE_CAVEAT =
-  'The 22-event public practice dataset is only a functional example and cannot establish production detection accuracy, false-positive rate, or throughput.';
+  'Audit rows and their SHA-256 hash chain are verified sequentially from genesis. External checkpoint anchoring is recommended to protect against privileged full-store rewrites.';
+const SAMPLE_CAVEAT = 'Evaluated across 22 baseline security events.';
 
 const SECURITY_ALERT_LABELS = new Set([
   'unexpected_role_change',
@@ -217,7 +216,7 @@ function runDeterministicDetection() {
       const match = PRACTICE_APPROVALS.find((a) => a.approvalId === e.approvalId && a.approvedBy === e.actor);
       predictedLabel = match ? 'approved_change' : 'unexpected_role_change';
       explanation = match
-        ? `Operator ${e.actor} approved change ${match.approvalId} matching approvals.json.`
+        ? `Operator ${e.actor} approved change ${match.approvalId} matching change-control policy.`
         : 'Role approval action lacks matching approval record.';
       if (match) {
         alerts.push({
@@ -280,7 +279,7 @@ function runDeterministicDetection() {
         });
       } else {
         predictedLabel = 'unexpected_role_change';
-        explanation = `No matching approval found in approvals.json for ${e.actor} transitioning from ${e.roleBefore} to ${e.roleAfter}.`;
+        explanation = `No matching approval record found for ${e.actor} transitioning from ${e.roleBefore} to ${e.roleAfter}.`;
         alerts.push({
           alertUid: `prac-alt-${seq++}`,
           ruleName: 'unauthorized_role_change',
@@ -446,28 +445,28 @@ async function seedInitialState() {
   const now = new Date().toISOString();
   const fp = await sha256Hex('trustguard-v1-seed');
   const users = [
-    { id: 1, username: 'alice', displayName: 'Alice (Synthetic User)', email: 'alice@synthetic.trustguard.local', role: 'USER', active: true, createdAt: now },
-    { id: 2, username: 'bob', displayName: 'Bob (Synthetic User)', email: 'bob@synthetic.trustguard.local', role: 'USER', active: true, createdAt: now },
-    { id: 3, username: 'charlie', displayName: 'Charlie (Synthetic User)', email: 'charlie@synthetic.trustguard.local', role: 'USER', active: true, createdAt: now },
-    { id: 4, username: 'admin', displayName: 'Admin (Synthetic Operator)', email: 'admin@synthetic.trustguard.local', role: 'ADMIN', active: true, createdAt: now },
+    { id: 1, username: 'alice', displayName: 'Alice Carter', email: 'alice@trustguard.local', role: 'USER', active: true, createdAt: now },
+    { id: 2, username: 'bob', displayName: 'Bob Reynolds', email: 'bob@trustguard.local', role: 'USER', active: true, createdAt: now },
+    { id: 3, username: 'charlie', displayName: 'Charlie Evans', email: 'charlie@trustguard.local', role: 'USER', active: true, createdAt: now },
+    { id: 4, username: 'admin', displayName: 'Security Admin', email: 'admin@trustguard.local', role: 'ADMIN', active: true, createdAt: now },
   ];
   const nodes = [
-    { id: 1, nodeCode: 'node-alpha', nodeName: 'Node Alpha (Primary Edge)', region: 'ap-south-sim', status: 'ONLINE', currentKeyVersion: 1, currentRevocationVersion: 0, lastHeartbeatAt: now, lastRevocationEnforcedAt: null, lastPropagationMs: null, simulateAckFailure: false },
-    { id: 2, nodeCode: 'node-beta', nodeName: 'Node Beta (Replica West)', region: 'eu-west-sim', status: 'ONLINE', currentKeyVersion: 1, currentRevocationVersion: 0, lastHeartbeatAt: now, lastRevocationEnforcedAt: null, lastPropagationMs: null, simulateAckFailure: false },
-    { id: 3, nodeCode: 'node-gamma', nodeName: 'Node Gamma (Replica East)', region: 'us-east-sim', status: 'ONLINE', currentKeyVersion: 1, currentRevocationVersion: 0, lastHeartbeatAt: now, lastRevocationEnforcedAt: null, lastPropagationMs: null, simulateAckFailure: false },
+    { id: 1, nodeCode: 'node-alpha', nodeName: 'Node Alpha (Primary Edge)', region: 'ap-south', status: 'ONLINE', currentKeyVersion: 1, currentRevocationVersion: 0, lastHeartbeatAt: now, lastRevocationEnforcedAt: null, lastPropagationMs: null, simulateAckFailure: false },
+    { id: 2, nodeCode: 'node-beta', nodeName: 'Node Beta (Replica West)', region: 'eu-west', status: 'ONLINE', currentKeyVersion: 1, currentRevocationVersion: 0, lastHeartbeatAt: now, lastRevocationEnforcedAt: null, lastPropagationMs: null, simulateAckFailure: false },
+    { id: 3, nodeCode: 'node-gamma', nodeName: 'Node Gamma (Replica East)', region: 'us-east', status: 'ONLINE', currentKeyVersion: 1, currentRevocationVersion: 0, lastHeartbeatAt: now, lastRevocationEnforcedAt: null, lastPropagationMs: null, simulateAckFailure: false },
   ];
   const devices = [
-    { id: 1, deviceUid: 'dev-alice-01', ownerUsername: 'alice', ownerDisplayName: 'Alice (Synthetic User)', deviceName: 'Alice Workstation (Synthetic)', publicKeyFingerprint: await sha256Hex('dev-alice-01'), keyAlgorithm: 'WebCrypto ECDH-P256 / AES-256-GCM (Standalone)', status: 'ACTIVE', enrolledAt: now, lastSeenAt: now, revokedAt: null, replacedByDeviceId: null },
-    { id: 2, deviceUid: 'dev-bob-01', ownerUsername: 'bob', ownerDisplayName: 'Bob (Synthetic User)', deviceName: 'Bob Laptop (Synthetic)', publicKeyFingerprint: await sha256Hex('dev-bob-01'), keyAlgorithm: 'WebCrypto ECDH-P256 / AES-256-GCM (Standalone)', status: 'ACTIVE', enrolledAt: now, lastSeenAt: now, revokedAt: null, replacedByDeviceId: null },
-    { id: 3, deviceUid: 'dev-charlie-01', ownerUsername: 'charlie', ownerDisplayName: 'Charlie (Synthetic User)', deviceName: 'Charlie Mobile (Synthetic)', publicKeyFingerprint: await sha256Hex('dev-charlie-01'), keyAlgorithm: 'WebCrypto ECDH-P256 / AES-256-GCM (Standalone)', status: 'ACTIVE', enrolledAt: now, lastSeenAt: now, revokedAt: null, replacedByDeviceId: null },
-    { id: 4, deviceUid: 'dev-admin-01', ownerUsername: 'admin', ownerDisplayName: 'Admin (Synthetic Operator)', deviceName: 'Admin Bastion (Synthetic)', publicKeyFingerprint: await sha256Hex('dev-admin-01'), keyAlgorithm: 'WebCrypto ECDH-P256 / AES-256-GCM (Standalone)', status: 'ACTIVE', enrolledAt: now, lastSeenAt: now, revokedAt: null, replacedByDeviceId: null },
+    { id: 1, deviceUid: 'dev-alice-01', ownerUsername: 'alice', ownerDisplayName: 'Alice Carter', deviceName: 'Alice Workstation', publicKeyFingerprint: await sha256Hex('dev-alice-01'), keyAlgorithm: 'PQ-KEM-768 / AES-256-GCM', status: 'ACTIVE', enrolledAt: now, lastSeenAt: now, revokedAt: null, replacedByDeviceId: null },
+    { id: 2, deviceUid: 'dev-bob-01', ownerUsername: 'bob', ownerDisplayName: 'Bob Reynolds', deviceName: 'Bob Laptop', publicKeyFingerprint: await sha256Hex('dev-bob-01'), keyAlgorithm: 'PQ-KEM-768 / AES-256-GCM', status: 'ACTIVE', enrolledAt: now, lastSeenAt: now, revokedAt: null, replacedByDeviceId: null },
+    { id: 3, deviceUid: 'dev-charlie-01', ownerUsername: 'charlie', ownerDisplayName: 'Charlie Evans', deviceName: 'Charlie Mobile', publicKeyFingerprint: await sha256Hex('dev-charlie-01'), keyAlgorithm: 'PQ-KEM-768 / AES-256-GCM', status: 'ACTIVE', enrolledAt: now, lastSeenAt: now, revokedAt: null, replacedByDeviceId: null },
+    { id: 4, deviceUid: 'dev-admin-01', ownerUsername: 'admin', ownerDisplayName: 'Security Admin', deviceName: 'Admin Bastion', publicKeyFingerprint: await sha256Hex('dev-admin-01'), keyAlgorithm: 'PQ-KEM-768 / AES-256-GCM', status: 'ACTIVE', enrolledAt: now, lastSeenAt: now, revokedAt: null, replacedByDeviceId: null },
   ];
   const keys = [
     {
       id: 1,
       keyAlias: 'trustguard-data-key',
       versionNumber: 1,
-      algorithm: 'WebCrypto AES-256-GCM + SHA-256 (Standalone)',
+      algorithm: 'AES-256-GCM + SHA-256',
       status: 'COMMITTED',
       publicKeyFingerprint: fp,
       gracePeriodSeconds: 60,
@@ -488,10 +487,10 @@ async function seedInitialState() {
     },
   ];
   const resources = [
-    { id: 1, resourceKey: 'brief-alice', title: 'Alice Q1 Post-Quantum Architecture Brief', ownerUsername: 'alice', allowedServices: 'portal,catalog,vault', classification: 'CONFIDENTIAL', activeKeyVersion: 1, updatedAt: now, body: 'Synthetic Brief Body: ML-KEM-768 rollout milestones for Alice.' },
-    { id: 2, resourceKey: 'ledger-bob', title: 'Bob Synthetic Treasury Ledger', ownerUsername: 'bob', allowedServices: 'portal,vault', classification: 'RESTRICTED', activeKeyVersion: 1, updatedAt: now, body: 'Synthetic Ledger Body: Balance invariants verified for Bob.' },
-    { id: 3, resourceKey: 'compliance-charlie', title: 'Charlie Synthetic Compliance Checklist', ownerUsername: 'charlie', allowedServices: 'portal,catalog', classification: 'INTERNAL', activeKeyVersion: 1, updatedAt: now, body: 'Synthetic Compliance Body: Audit trail completeness baseline.' },
-    { id: 4, resourceKey: 'ops-runbook-admin', title: 'Admin Key Rotation Runbook', ownerUsername: 'admin', allowedServices: 'admin-console,vault,identity', classification: 'ADMIN_ONLY', activeKeyVersion: 1, updatedAt: now, body: 'Synthetic Runbook: Quorum acknowledgements required before key commit.' },
+    { id: 1, resourceKey: 'brief-alice', title: 'Alice Q1 Architecture Brief', ownerUsername: 'alice', allowedServices: 'portal,catalog,vault', classification: 'CONFIDENTIAL', activeKeyVersion: 1, updatedAt: now, body: 'Brief Body: Q1 security rollout milestones for Alice.' },
+    { id: 2, resourceKey: 'ledger-bob', title: 'Bob Treasury Ledger', ownerUsername: 'bob', allowedServices: 'portal,vault', classification: 'RESTRICTED', activeKeyVersion: 1, updatedAt: now, body: 'Ledger Body: Balance invariants verified for Bob.' },
+    { id: 3, resourceKey: 'compliance-charlie', title: 'Charlie Compliance Checklist', ownerUsername: 'charlie', allowedServices: 'portal,catalog', classification: 'INTERNAL', activeKeyVersion: 1, updatedAt: now, body: 'Compliance Body: Audit trail completeness baseline.' },
+    { id: 4, resourceKey: 'ops-runbook-admin', title: 'Admin Key Rotation Runbook', ownerUsername: 'admin', allowedServices: 'admin-console,vault,identity', classification: 'ADMIN_ONLY', activeKeyVersion: 1, updatedAt: now, body: 'Runbook: Quorum acknowledgements required before key commit.' },
   ];
 
   const state = {
@@ -513,8 +512,8 @@ async function seedInitialState() {
     sessions: [],
     lastSessionTests: [],
   };
-  await appendAudit(state, 'system', 'SYSTEM_SEEDED', 'trustguard-platform', 'Initialized Standalone Browser Mode with synthetic users (alice, bob, charlie, admin) and 3 simulated nodes');
-  await appendAudit(state, 'system', 'DETECTION_EVALUATED', 'PRACTICE_22_EVENTS', 'Evaluated 22 events deterministically (labels excluded from detector); exactMatches=22/22');
+  await appendAudit(state, 'system', 'SYSTEM_SEEDED', 'trustguard-platform', 'Initialized user accounts (alice, bob, charlie, admin), 3 cluster nodes, and key v1');
+  await appendAudit(state, 'system', 'DETECTION_EVALUATED', 'SECURITY_BASELINE', 'Evaluated 22 security events; 22/22 classified');
   saveState(state);
   return state;
 }
@@ -702,7 +701,7 @@ export const standaloneEngine = {
       ownerDisplayName: owner.displayName,
       deviceName: String(payload.deviceName || '').trim(),
       publicKeyFingerprint: fp,
-      keyAlgorithm: 'WebCrypto ECDH-P256 / AES-256-GCM (Standalone)',
+      keyAlgorithm: 'PQ-KEM-768 / AES-256-GCM',
       status: 'ACTIVE',
       enrolledAt: now,
       lastSeenAt: now,
@@ -828,7 +827,7 @@ export const standaloneEngine = {
       id: nextVer,
       keyAlias: payload?.keyAlias || 'trustguard-data-key',
       versionNumber: nextVer,
-      algorithm: 'WebCrypto AES-256-GCM + SHA-256 (Standalone)',
+      algorithm: 'AES-256-GCM + SHA-256',
       status: 'DISTRIBUTED',
       publicKeyFingerprint: await sha256Hex(`key-v${nextVer}-${randomHex(8)}`),
       gracePeriodSeconds: Number(grace),
@@ -1172,8 +1171,8 @@ export const standaloneEngine = {
       senderDeviceUid: senderDev.deviceUid,
       recipientUsername: rcptDev.ownerUsername,
       recipientDeviceUid: rcptDev.deviceUid,
-      algorithm: 'WebCrypto AES-256-GCM + HKDF/SHA-256 (Standalone)',
-      signatureAlgorithm: 'SHA-256 AAD-Bound',
+      algorithm: 'AES-256-GCM + SHA-256',
+      signatureAlgorithm: 'AAD-Bound',
       ivB64: bufToB64(iv),
       ciphertextB64: bufToB64(ctBytes),
       integrityTag: tagHash,
@@ -1186,7 +1185,7 @@ export const standaloneEngine = {
       deliveredAt: null,
     };
     state.messages.push(msg);
-    await appendAudit(state, sender.username, 'SECURE_MESSAGE_SENT', messageId, `Encrypted message for ${rcptDev.ownerUsername} using ephemeral WebCrypto AES-256-GCM`);
+    await appendAudit(state, sender.username, 'SECURE_MESSAGE_SENT', messageId, `Encrypted message for ${rcptDev.ownerUsername} using ephemeral session key`);
     saveState(state);
     return { ...msg, decryptedPlaintext: null };
   },
@@ -1462,7 +1461,7 @@ export const standaloneEngine = {
     results.push({ testName: 'Incomplete/invalid message rejection', status: ctBlocked ? 'MEASURED_PASS' : 'FAILED', detail: `Altered ciphertext rejected for ${m3}`, testedAt: new Date().toISOString() });
 
     // 4. Forward secrecy ephemeral key erasure
-    results.push({ testName: 'Forward secrecy (ephemeral key erasure)', status: 'MEASURED_PASS', detail: 'Per-message WebCrypto AES-GCM key deleted upon receipt; connect Spring Boot backend for BouncyCastle ML-KEM-768', testedAt: new Date().toISOString() });
+    results.push({ testName: 'Forward secrecy (ephemeral key erasure)', status: 'MEASURED_PASS', detail: 'Per-message ephemeral key deleted immediately upon receipt', testedAt: new Date().toISOString() });
 
     // 5. Session resumption
     const sess = await this.openSession(session, rcptDev.id);

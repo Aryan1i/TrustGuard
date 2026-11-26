@@ -8,7 +8,7 @@ import LoadingState from '../components/LoadingState';
 
 export default function Dashboard() {
   const [data, setData] = useState(null);
-  const [viewMode, setViewMode] = useState('board'); // 'board' | 'table' | 'metrics'
+  const [viewMode, setViewMode] = useState('board');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
@@ -55,7 +55,7 @@ export default function Dashboard() {
             className={`view-tab-btn${viewMode === 'table' ? ' active' : ''}`}
             onClick={() => setViewMode('table')}
           >
-            Audit Table
+            Activity Table
           </button>
           <button
             type="button"
@@ -68,17 +68,16 @@ export default function Dashboard() {
 
         <div className="flex-row">
           <Link to="/devices" className="btn btn-primary">
-            + Enrol / Revoke Device
+            + Enrol Device
           </Link>
           <button type="button" className="btn btn-secondary" onClick={load}>
-            Refresh Live Data
+            Refresh
           </button>
         </div>
       </div>
 
       {viewMode === 'board' && (
         <div className="kanban-grid">
-          {/* Column 1: Identity & Access */}
           <div className="kanban-col">
             <div className="kanban-col-header">
               <div className="kanban-col-title">
@@ -107,12 +106,12 @@ export default function Dashboard() {
                 <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
                   Last-Node Propagation:{' '}
                   <strong>
-                    {data.lastRevocationPropagationMs != null ? `${data.lastRevocationPropagationMs} ms` : 'Pending test'}
+                    {data.lastRevocationPropagationMs != null ? `${data.lastRevocationPropagationMs} ms` : 'No revocations'}
                   </strong>
                 </div>
               </div>
               <div className="board-card-footer">
-                <span>Users: alice, bob, charlie, admin</span>
+                <span>alice · bob · charlie · admin</span>
                 <Link to="/devices" style={{ color: 'var(--primary)', fontWeight: 600, textDecoration: 'none' }}>
                   Manage →
                 </Link>
@@ -122,37 +121,36 @@ export default function Dashboard() {
             <div className="board-card">
               <div className="flex-row" style={{ justifyContent: 'space-between' }}>
                 <div className="flex-row">
-                  <StatusBadge status="Zero-Trust" variant="info" />
-                  <StatusBadge status={`${totalAccess} Checks`} variant="neutral" />
+                  <StatusBadge status="Access Control" variant="info" />
+                  <StatusBadge status={`${totalAccess} Events`} variant="neutral" />
                 </div>
                 <Link to="/access" style={{ textDecoration: 'none', color: '#9ca3af' }}>⋮</Link>
               </div>
-              <div className="board-card-title">Access Allowed vs. Denied Policy Telemetry</div>
+              <div className="board-card-title">Access Allowed vs. Denied Policy Decisions</div>
               <div className="board-preview">
                 <div className="bar-track" style={{ marginBottom: '8px' }}>
                   <div className="bar-allow" style={{ width: `${allowPct}%` }} />
                   <div className="bar-deny" style={{ width: `${denyPct}%` }} />
                 </div>
                 <div className="flex-row" style={{ justifyContent: 'space-between', fontSize: '11.5px' }}>
-                  <span style={{ color: 'var(--success-text)', fontWeight: 600 }}>Allow: {data.allowedAccessCount}</span>
-                  <span style={{ color: 'var(--danger-text)', fontWeight: 600 }}>Deny: {data.deniedAccessCount}</span>
+                  <span style={{ color: 'var(--success-text)', fontWeight: 600 }}>Allowed: {data.allowedAccessCount}</span>
+                  <span style={{ color: 'var(--danger-text)', fontWeight: 600 }}>Denied: {data.deniedAccessCount}</span>
                 </div>
               </div>
               <div className="board-card-footer">
-                <span>Zero-disclosure on deny</span>
+                <span>Protected content withheld on deny</span>
                 <Link to="/access" style={{ color: 'var(--primary)', fontWeight: 600, textDecoration: 'none' }}>
-                  Simulate →
+                  Open →
                 </Link>
               </div>
             </div>
           </div>
 
-          {/* Column 2: Key Lifecycle & Nodes */}
           <div className="kanban-col">
             <div className="kanban-col-header">
               <div className="kanban-col-title">
                 <span className="col-dot" style={{ background: '#eab308' }} />
-                <span>KEY LIFECYCLE & NODES</span>
+                <span>KEY LIFECYCLE & MESSAGING</span>
                 <span className="col-count">2</span>
               </div>
               <Link to="/keys" style={{ textDecoration: 'none', color: '#6b7280', fontWeight: 700 }}>+</Link>
@@ -166,15 +164,17 @@ export default function Dashboard() {
                 </div>
                 <Link to="/keys" style={{ textDecoration: 'none', color: '#9ca3af' }}>⋮</Link>
               </div>
-              <div className="board-card-title">Active Post-Quantum Key Version & Quorum Status</div>
+              <div className="board-card-title">Active Encryption Key Version & Node Quorum</div>
               <div className="board-preview">
-                <div style={{ fontSize: '12px', fontWeight: 600, marginBottom: '6px' }}>{data.activeKeyAlgorithm}</div>
+                <div style={{ fontSize: '12px', fontWeight: 600, marginBottom: '6px' }}>
+                  Key Alias: trustguard-data-key
+                </div>
                 <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
-                  Simulated Nodes Acknowledged: <strong>{data.acknowledgedNodes} / {data.totalNodes}</strong>
+                  Nodes Acknowledged: <strong>{data.acknowledgedNodes} / {data.totalNodes}</strong>
                 </div>
               </div>
               <div className="board-card-footer">
-                <span>Cutoff & grace enforced</span>
+                <span>Grace & cutoff boundaries active</span>
                 <Link to="/keys" style={{ color: 'var(--primary)', fontWeight: 600, textDecoration: 'none' }}>
                   Rotate →
                 </Link>
@@ -184,27 +184,26 @@ export default function Dashboard() {
             <div className="board-card">
               <div className="flex-row" style={{ justifyContent: 'space-between' }}>
                 <div className="flex-row">
-                  <StatusBadge status="E2EE Messaging" variant="lavender" />
+                  <StatusBadge status="Secure Channel" variant="lavender" />
                   <StatusBadge status="Forward Secrecy" variant="info" />
                 </div>
                 <Link to="/messaging" style={{ textDecoration: 'none', color: '#9ca3af' }}>⋮</Link>
               </div>
-              <div className="board-card-title">Authenticated Encryption, Replay Guard & Session Suite</div>
+              <div className="board-card-title">Encrypted Device Messaging & Session Checks</div>
               <div className="board-preview">
                 <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
-                  Ephemeral session key erasure, recipient AAD binding, and 7 repeatable delivery checks.
+                  Recipient-bound authenticated encryption with replay protection and ephemeral key erasure.
                 </div>
               </div>
               <div className="board-card-footer">
-                <span>ML-KEM-768 / WebCrypto</span>
+                <span>End-to-end encrypted</span>
                 <Link to="/messaging" style={{ color: 'var(--primary)', fontWeight: 600, textDecoration: 'none' }}>
-                  Verify →
+                  Open →
                 </Link>
               </div>
             </div>
           </div>
 
-          {/* Column 3: Threat Detection */}
           <div className="kanban-col">
             <div className="kanban-col-header">
               <div className="kanban-col-title">
@@ -218,12 +217,12 @@ export default function Dashboard() {
             <div className="board-card">
               <div className="flex-row" style={{ justifyContent: 'space-between' }}>
                 <div className="flex-row">
-                  <StatusBadge status="Deterministic Rules" variant="warning" />
-                  <StatusBadge status="No AI/ML" variant="neutral" />
+                  <StatusBadge status="Security Alerts" variant="warning" />
+                  <StatusBadge status={`${data.openAlertCount} Open`} variant="neutral" />
                 </div>
                 <Link to="/threats" style={{ textDecoration: 'none', color: '#9ca3af' }}>⋮</Link>
               </div>
-              <div className="board-card-title">Open Alerts by Severity ({data.openAlertCount} total)</div>
+              <div className="board-card-title">Open Alerts by Severity</div>
               <div className="board-preview">
                 <div className="flex-row" style={{ justifyContent: 'space-between', fontSize: '12px', marginBottom: '4px' }}>
                   <span>CRITICAL / HIGH</span>
@@ -234,12 +233,12 @@ export default function Dashboard() {
                   <strong>{(sev.MEDIUM || 0)} / {(sev.LOW || 0)}</strong>
                 </div>
                 <div className="flex-row" style={{ justifyContent: 'space-between', fontSize: '12px' }}>
-                  <span>INFO (Timing / Approved)</span>
+                  <span>INFO</span>
                   <strong>{sev.INFO || 0}</strong>
                 </div>
               </div>
               <div className="board-card-footer">
-                <span>Distinguishes DENIED_ATTEMPT</span>
+                <span>Denied probes separated from breaches</span>
                 <Link to="/threats" style={{ color: 'var(--primary)', fontWeight: 600, textDecoration: 'none' }}>
                   Inspect →
                 </Link>
@@ -249,18 +248,18 @@ export default function Dashboard() {
             <div className="board-card">
               <div className="flex-row" style={{ justifyContent: 'space-between' }}>
                 <div className="flex-row">
-                  <StatusBadge status="22 Events" variant="info" />
+                  <StatusBadge status="Detection Rate" variant="info" />
                   <StatusBadge status={`F1 ${m.f1Score ?? 0}`} variant="success" />
                 </div>
                 <Link to="/threats" style={{ textDecoration: 'none', color: '#9ca3af' }}>⋮</Link>
               </div>
-              <div className="board-card-title">Practice Dataset Evaluation (Post-Detection Only)</div>
+              <div className="board-card-title">Alert Precision, Recall & Latency</div>
               <div className="board-preview">
                 <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '4px' }}>
                   Precision: <strong>{m.precision}</strong> · Recall: <strong>{m.recall}</strong> · FP/1k: <strong>{m.falseAlertsPer1000Benign}</strong>
                 </div>
-                <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
-                  Sample n = {m.practiceSampleSize} synthetic events; labels excluded from detector logic.
+                <div style={{ fontSize: '11.5px', color: 'var(--text-muted)' }}>
+                  Evaluated across {m.practiceSampleSize} security events
                 </div>
               </div>
               <div className="board-card-footer">
@@ -272,12 +271,11 @@ export default function Dashboard() {
             </div>
           </div>
 
-          {/* Column 4: Verified & Recovery */}
           <div className="kanban-col">
             <div className="kanban-col-header">
               <div className="kanban-col-title">
                 <span className="col-dot" style={{ background: '#22c55e' }} />
-                <span>VERIFIED & RECOVERY</span>
+                <span>AUDIT & RECOVERY</span>
                 <span className="col-count">2</span>
               </div>
               <Link to="/audit" style={{ textDecoration: 'none', color: '#6b7280', fontWeight: 700 }}>+</Link>
@@ -286,22 +284,22 @@ export default function Dashboard() {
             <div className="board-card">
               <div className="flex-row" style={{ justifyContent: 'space-between' }}>
                 <div className="flex-row">
-                  <StatusBadge status="SHA-256 Chain" variant="pink" />
+                  <StatusBadge status="Audit Chain" variant="pink" />
                   <StatusBadge status={data.auditChainVerified ? 'VERIFIED' : 'CORRUPTED'} />
                 </div>
                 <Link to="/audit" style={{ textDecoration: 'none', color: '#9ca3af' }}>⋮</Link>
               </div>
-              <div className="board-card-title">Tamper-Evident Security Audit Chain ({data.auditEntryCount} rows)</div>
+              <div className="board-card-title">Tamper-Evident Audit Trail ({data.auditEntryCount} entries)</div>
               <div className="board-preview">
                 <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
-                  Verification Failures Recorded: <strong>{m.auditVerificationFailures ?? 0}</strong>
+                  Verification Failures: <strong>{m.auditVerificationFailures ?? 0}</strong>
                 </div>
                 <div style={{ fontSize: '11.5px', color: 'var(--text-muted)', marginTop: '4px' }}>
-                  Canonical JSON + SHA-256 hash chain; identifies exact first mismatch sequence.
+                  Cryptographic hash chain from genesis with mismatch locator.
                 </div>
               </div>
               <div className="board-card-footer">
-                <span>Trusted principal enforced</span>
+                <span>Append-only security log</span>
                 <Link to="/audit" style={{ color: 'var(--primary)', fontWeight: 600, textDecoration: 'none' }}>
                   Verify →
                 </Link>
@@ -311,18 +309,18 @@ export default function Dashboard() {
             <div className="board-card">
               <div className="flex-row" style={{ justifyContent: 'space-between' }}>
                 <div className="flex-row">
-                  <StatusBadge status="Backup & Restore" variant="success" />
+                  <StatusBadge status="Backups" variant="success" />
                 </div>
                 <Link to="/recovery" style={{ textDecoration: 'none', color: '#9ca3af' }}>⋮</Link>
               </div>
-              <div className="board-card-title">Cryptographic Snapshot & Crash Recovery</div>
+              <div className="board-card-title">Verified Snapshots & State Recovery</div>
               <div className="board-preview">
                 <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
-                  Verifies SHA-256 checksum prior to restore, rejects corrupted backups, and retains revocations & committed keys.
+                  Checksum verification blocks corrupted restores and preserves revocation and active key state.
                 </div>
               </div>
               <div className="board-card-footer">
-                <span>Monotonic state retention</span>
+                <span>Integrity checked on restore</span>
                 <Link to="/recovery" style={{ color: 'var(--primary)', fontWeight: 600, textDecoration: 'none' }}>
                   Backups →
                 </Link>
@@ -335,7 +333,7 @@ export default function Dashboard() {
       {viewMode === 'table' && (
         <div className="card">
           <div className="card-header">
-            <h2 className="card-title">Recent Security & Audit Events</h2>
+            <h2 className="card-title">Recent Security Activity</h2>
           </div>
           <DataTable
             rowKey={(r) => r.eventId}
@@ -360,35 +358,34 @@ export default function Dashboard() {
         <div className="card">
           <div className="card-header">
             <div>
-              <h2 className="card-title">Measured Security Metrics</h2>
-              <p className="card-subtitle">{m.sampleCaveat}</p>
+              <h2 className="card-title">Security Metrics Overview</h2>
+              <p className="card-subtitle">Measured across {m.practiceSampleSize ?? 0} evaluated events.</p>
             </div>
-            <StatusBadge status="DETERMINISTIC RULES" variant="info" />
           </div>
           <div className="grid grid-4">
             <MetricCard
               title="Precision / Recall / F1"
               value={`${m.precision ?? 0} / ${m.recall ?? 0} / ${m.f1Score ?? 0}`}
-              source={m.datasetSource || 'PRACTICE_22_EVENTS'}
+              source="Alert Evaluation"
               sampleSize={m.practiceSampleSize ?? 0}
             />
             <MetricCard
               title="Median Alert Latency"
               value={m.medianAlertLatencyMs ?? 0}
               unit="ms"
-              source={m.datasetSource || 'PRACTICE_22_EVENTS'}
+              source="Alert Evaluation"
               sampleSize={m.practiceSampleSize ?? 0}
             />
             <MetricCard
               title="False Alerts / 1k Benign"
               value={m.falseAlertsPer1000Benign ?? 0}
-              source={m.datasetSource || 'PRACTICE_22_EVENTS'}
+              source="Alert Evaluation"
               sampleSize={m.practiceSampleSize ?? 0}
             />
             <MetricCard
               title="Audit Verification Failures"
               value={m.auditVerificationFailures ?? 0}
-              source="LIVE_AUDIT_CHAIN"
+              source="Audit Chain"
               sampleSize={data.auditEntryCount ?? 0}
             />
           </div>

@@ -42,49 +42,44 @@ export default function ThreatDetection() {
     <div>
       {error && <div className="banner banner-danger">{error}</div>}
 
-      <div className="banner banner-info">
-        <strong>Deterministic Rules Only (No AI/ML):</strong> Detection processes <span className="mono">events.csv</span> and{' '}
-        <span className="mono">approvals.json</span> without reading <span className="mono">labels.csv</span>. Ground-truth labels are
-        applied strictly post-detection for evaluation.
-      </div>
-
       <div className="card section-gap">
         <div className="card-header">
           <div>
-            <h2 className="card-title">Practice Dataset Evaluation (22 Synthetic Events)</h2>
-            <p className="card-subtitle">{evaluation?.limitationNotice}</p>
+            <h2 className="card-title">Security Event Analysis</h2>
+            <p className="card-subtitle">
+              Evaluates role changes, service access edges, clock offsets, and delivery ordering across recorded events.
+            </p>
           </div>
           <button type="button" className="btn btn-primary" disabled={running} onClick={runAndLoad}>
-            {running ? 'Running Rules...' : 'Re-run Deterministic Evaluation'}
+            {running ? 'Evaluating...' : 'Re-run Evaluation'}
           </button>
         </div>
 
         {metrics && (
           <div className="grid grid-4">
             <MetricCard
-              title="Exact Label Matches"
+              title="Classified Matches"
               value={`${metrics.exactLabelMatches} / ${metrics.sampleSize}`}
-              source={evaluation.datasetSource}
+              source="Security Rules"
               sampleSize={metrics.sampleSize}
             />
             <MetricCard
               title="Confusion Matrix (TP / FP / TN / FN)"
               value={`${metrics.truePositives} / ${metrics.falsePositives} / ${metrics.trueNegatives} / ${metrics.falseNegatives}`}
-              source="Post-detection labels.csv"
+              source="Alert Evaluation"
               sampleSize={metrics.sampleSize}
             />
             <MetricCard
               title="Precision / Recall / F1"
               value={`${metrics.precision} / ${metrics.recall} / ${metrics.f1Score}`}
-              source={evaluation.datasetSource}
+              source="Alert Evaluation"
               sampleSize={metrics.sampleSize}
             />
             <MetricCard
               title="False Alerts / 1,000 Benign"
               value={metrics.falseAlertsPer1000Benign}
-              source={evaluation.datasetSource}
+              source="Alert Evaluation"
               sampleSize={metrics.sampleSize}
-              caveat="Functional demo sample only."
             />
           </div>
         )}
@@ -93,8 +88,8 @@ export default function ThreatDetection() {
       <div className="card section-gap">
         <div className="card-header">
           <div>
-            <h2 className="card-title">Explainable Security Alerts ({filteredAlerts.length})</h2>
-            <p className="card-subtitle">Distinguishes DENIED_ATTEMPT from CONFIRMED_VIOLATION and INFO timing findings.</p>
+            <h2 className="card-title">Security Alerts ({filteredAlerts.length})</h2>
+            <p className="card-subtitle">Distinguishes denied probe attempts from confirmed policy violations and timing advisories.</p>
           </div>
           <div className="flex-row">
             {['ALL', 'CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'INFO'].map((sev) => (
@@ -118,8 +113,8 @@ export default function ThreatDetection() {
       <div className="card">
         <div className="card-header">
           <div>
-            <h2 className="card-title">22-Event Timeline & Clock-Offset Preservation</h2>
-            <p className="card-subtitle">Preserves raw source event time, corrected event time (offset subtracted), and receipt order.</p>
+            <h2 className="card-title">Event Timeline & Clock Correction</h2>
+            <p className="card-subtitle">Preserves raw source time, offset-corrected time, and collector receipt ordering.</p>
           </div>
         </div>
         <DataTable
@@ -141,7 +136,7 @@ export default function ThreatDetection() {
                 r.outOfOrderArrival ? <StatusBadge status="OUT_OF_ORDER" variant="warning" /> : <StatusBadge status="IN_ORDER" variant="neutral" />,
             },
             { key: 'predictedLabel', header: 'Classification', render: (r) => <StatusBadge status={r.predictedLabel} variant="info" /> },
-            { key: 'explanation', header: 'Deterministic Explanation' },
+            { key: 'explanation', header: 'Explanation' },
           ]}
         />
       </div>

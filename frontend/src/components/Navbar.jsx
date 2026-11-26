@@ -10,7 +10,7 @@ const IDENTITIES = [
   { key: 'CH', name: 'charlie', bg: '#b45309' },
 ];
 
-export default function Navbar({ title, session, runtimeMode, onLogout, onOpenLogin }) {
+export default function Navbar({ title, session, onLogout, onOpenLogin }) {
   return (
     <header className="top-header">
       <div className="top-header-row">
@@ -20,23 +20,14 @@ export default function Navbar({ title, session, runtimeMode, onLogout, onOpenLo
             <span style={{ fontSize: '16px' }}>⚡</span>
           </h1>
           <div className="page-breadcrumb">
-            TrustGuard / Track 4: Trust, but verify / {title}
+            TrustGuard / Security Operations / {title}
           </div>
         </div>
 
         <div className="header-controls">
-          <StatusBadge
-            status={
-              runtimeMode === 'backend'
-                ? 'Spring Boot Backend'
-                : runtimeMode === 'standalone'
-                ? 'Vercel Standalone Mode'
-                : 'Connecting...'
-            }
-            variant={runtimeMode === 'backend' ? 'success' : 'lavender'}
-          />
+          <StatusBadge status="ACTIVE" variant="success" />
 
-          <div className="avatar-stack" title="Synthetic identities (click to switch)">
+          <div className="avatar-stack" title="Switch active user account">
             {IDENTITIES.map((id) => (
               <button
                 key={id.name}
@@ -58,7 +49,7 @@ export default function Navbar({ title, session, runtimeMode, onLogout, onOpenLo
             type="button"
             className="btn btn-secondary btn-sm"
             onClick={onOpenLogin}
-            title="Switch Authenticated Identity"
+            title="Switch Account"
           >
             {session?.username} ({session?.role})
           </button>

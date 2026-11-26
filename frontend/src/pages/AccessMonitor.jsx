@@ -87,7 +87,7 @@ export default function AccessMonitor({ session }) {
           <div>
             <h2 className="card-title">Zero-Trust Access Policy Simulator</h2>
             <p className="card-subtitle">
-              Real requests use authenticated JWT principal ({session?.username}). Demo actor override is restricted to ADMIN and explicitly labeled demo-only.
+              Evaluate device trust, resource ownership, key validity, and service-level authorization policies.
             </p>
           </div>
           <div className="flex-row">
@@ -173,13 +173,13 @@ export default function AccessMonitor({ session }) {
                 disabled={!isAdmin}
                 onChange={(e) => setSimulationMode(e.target.value === 'demo')}
               >
-                <option value="auth">Authenticated Principal ({session?.username})</option>
-                {isAdmin && <option value="demo">Demo-Only Actor Simulation (Admin)</option>}
+                <option value="auth">Current User ({session?.username})</option>
+                {isAdmin && <option value="demo">Simulate User (Admin)</option>}
               </select>
             </div>
             {simulationMode && isAdmin && (
               <div className="field">
-                <label>Simulated Actor (Demo Only)</label>
+                <label>Target Actor</label>
                 <select value={simulatedActor} onChange={(e) => setSimulatedActor(e.target.value)}>
                   <option value="alice">alice</option>
                   <option value="bob">bob</option>
@@ -191,7 +191,7 @@ export default function AccessMonitor({ session }) {
             <div className="field">
               <label>Device</label>
               <select value={deviceId} onChange={(e) => setDeviceId(e.target.value)}>
-                <option value="">Auto-select actor active device</option>
+                <option value="">Auto-select active device</option>
                 {devices.map((d) => (
                   <option key={d.id} value={d.id}>
                     {d.deviceUid} ({d.ownerUsername} · {d.status})
@@ -237,7 +237,7 @@ export default function AccessMonitor({ session }) {
               </select>
             </div>
             <div className="field">
-              <label>Key Version Override (Optional)</label>
+              <label>Key Version (Optional)</label>
               <input
                 type="number"
                 min="1"
@@ -263,7 +263,7 @@ export default function AccessMonitor({ session }) {
                 <strong>Decision: {lastResult.decision}</strong> · {lastResult.reason}
                 {lastResult.demoSimulation && (
                   <span style={{ marginLeft: '8px' }}>
-                    <StatusBadge status="DEMO SIMULATION" variant="warning" />
+                    <StatusBadge status="SIMULATED" variant="warning" />
                   </span>
                 )}
               </div>
@@ -272,7 +272,7 @@ export default function AccessMonitor({ session }) {
             <div style={{ marginTop: '6px', fontSize: '12.5px' }}>
               {lastResult.decision === 'ALLOW'
                 ? `Protected Content: ${lastResult.body}`
-                : 'Protected content withheld (zero disclosure on denied access).'}
+                : 'Protected content withheld on denied access.'}
             </div>
           </div>
         )}
@@ -298,7 +298,7 @@ export default function AccessMonitor({ session }) {
                   <strong>{e.actor}</strong>
                   {e.demoSimulation && (
                     <div style={{ fontSize: '11px', color: 'var(--warning-text)' }}>
-                      demo-sim by {e.authenticatedPrincipal}
+                      simulated by {e.authenticatedPrincipal}
                     </div>
                   )}
                 </div>

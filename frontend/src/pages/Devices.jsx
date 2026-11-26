@@ -19,7 +19,7 @@ export default function Devices({ session }) {
   const [submitting, setSubmitting] = useState(false);
 
   const [revokeTarget, setRevokeTarget] = useState(null);
-  const [revokeReason, setRevokeReason] = useState('Lost device scenario');
+  const [revokeReason, setRevokeReason] = useState('Lost or compromised device');
 
   const loadAll = async () => {
     setLoading(true);
@@ -52,7 +52,7 @@ export default function Devices({ session }) {
         replacesDeviceId: replacesDeviceId ? Number(replacesDeviceId) : null,
       };
       const created = await api.enrolDevice(payload);
-      setNotice(`Enrolled replacement/new device ${created.deviceUid} for ${created.ownerUsername}`);
+      setNotice(`Enrolled device ${created.deviceUid} for ${created.ownerUsername}`);
       setDeviceName('');
       setReplacesDeviceId('');
       await loadAll();
@@ -72,8 +72,8 @@ export default function Devices({ session }) {
       const res = await api.revokeDevice(revokeTarget.id, revokeReason);
       setNotice(
         `Revoked ${res.device.deviceUid} (revocation v${res.revocationVersion}). ` +
-          `Propagated to ${res.nodesEnforced}/${res.totalNodes} simulated nodes in ${res.propagationLatencyMs} ms. ` +
-          `Other users' permissions preserved.`
+          `Propagated to ${res.nodesEnforced}/${res.totalNodes} nodes in ${res.propagationLatencyMs} ms. ` +
+          `Other users' permissions remain active.`
       );
       setRevokeTarget(null);
       await loadAll();
@@ -96,13 +96,13 @@ export default function Devices({ session }) {
           <div className="card-header">
             <div>
               <h2 className="card-title">Enroll / Replace Device</h2>
-              <p className="card-subtitle">Generates ML-KEM-768 + ML-DSA-65 device keys (private keys kept outside DB).</p>
+              <p className="card-subtitle">Issues a new cryptographic device identity and public key fingerprint.</p>
             </div>
           </div>
           <form onSubmit={handleEnrol}>
             <div className="form-grid" style={{ marginBottom: '12px' }}>
               <div className="field">
-                <label>Owner (Synthetic User)</label>
+                <label>Device Owner</label>
                 <select
                   value={session?.role === 'ADMIN' ? ownerUsername : session?.username || 'alice'}
                   disabled={session?.role !== 'ADMIN'}
@@ -139,7 +139,7 @@ export default function Devices({ session }) {
               </div>
             </div>
             <button type="submit" className="btn btn-primary" disabled={submitting}>
-              {submitting ? 'Generating PQC Keys...' : 'Enroll Device'}
+              {submitting ? 'Generating Keys...' : 'Enroll Device'}
             </button>
           </form>
         </div>
@@ -147,8 +147,8 @@ export default function Devices({ session }) {
         <div className="card">
           <div className="card-header">
             <div>
-              <h2 className="card-title">Simulated Node Revocation Enforcement</h2>
-              <p className="card-subtitle">All nodes enforce current revocation version on every access check.</p>
+              <h2 className="card-title">Cluster Node Enforcement</h2>
+              <p className="card-subtitle">All policy enforcement nodes synchronize revocation versions automatically.</p>
             </div>
           </div>
           <DataTable
@@ -184,7 +184,7 @@ export default function Devices({ session }) {
             { key: 'deviceName', header: 'Device Name' },
             {
               key: 'publicKeyFingerprint',
-              header: 'ML-KEM-768 Fingerprint',
+              header: 'Public Key Fingerprint',
               render: (d) => <span className="mono">{d.publicKeyFingerprint?.slice(0, 16)}…</span>,
             },
             {
@@ -223,7 +223,7 @@ export default function Devices({ session }) {
       <ConfirmModal
         open={Boolean(revokeTarget)}
         title={`Revoke Device ${revokeTarget?.deviceUid || ''}?`}
-        message={`This will revoke ${revokeTarget?.ownerUsername}'s device across all 3 simulated nodes, increment revocation version, and preserve peer users' permissions.`}
+        message={`This will revoke ${revokeTarget?.ownerUsername}'s device across all policy nodes, increment the revocation version, and leave other users' devices unaffected.`}
         confirmLabel="Confirm Revocation"
         danger
         busy={submitting}

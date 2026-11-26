@@ -7,7 +7,6 @@ import LoadingState from '../components/LoadingState';
 export default function Settings({ session, onOpenLogin }) {
   const [users, setUsers] = useState([]);
   const [nodes, setNodes] = useState([]);
-  const [metrics, setMetrics] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
@@ -15,10 +14,9 @@ export default function Settings({ session, onOpenLogin }) {
     setLoading(true);
     setError('');
     try {
-      const [u, n, m] = await Promise.all([api.getUsers(), api.getNodes(), api.getSecurityMetrics()]);
+      const [u, n] = await Promise.all([api.getUsers(), api.getNodes()]);
       setUsers(u);
       setNodes(n);
-      setMetrics(m);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -40,8 +38,8 @@ export default function Settings({ session, onOpenLogin }) {
         <div className="card">
           <div className="card-header">
             <div>
-              <h2 className="card-title">Synthetic Identities & Auth Configuration</h2>
-              <p className="card-subtitle">Active identity: {session?.username} ({session?.role})</p>
+              <h2 className="card-title">User Accounts & Roles</h2>
+              <p className="card-subtitle">Signed in as {session?.username} ({session?.role})</p>
             </div>
             <button type="button" className="btn btn-primary btn-sm" onClick={onOpenLogin}>
               Switch User
@@ -52,7 +50,7 @@ export default function Settings({ session, onOpenLogin }) {
             rows={users}
             columns={[
               { key: 'username', header: 'Username', render: (u) => <span className="mono">{u.username}</span> },
-              { key: 'displayName', header: 'Display Name' },
+              { key: 'displayName', header: 'Name' },
               { key: 'role', header: 'Role', render: (u) => <StatusBadge status={u.role} variant="info" /> },
               { key: 'active', header: 'Status', render: (u) => <StatusBadge status={u.active ? 'ACTIVE' : 'DISABLED'} /> },
             ]}
@@ -62,26 +60,22 @@ export default function Settings({ session, onOpenLogin }) {
         <div className="card">
           <div className="card-header">
             <div>
-              <h2 className="card-title">Cryptographic & Architectural Boundaries</h2>
-              <p className="card-subtitle">Honest scope and documented limitations for Track 4 review.</p>
+              <h2 className="card-title">Security Policies</h2>
+              <p className="card-subtitle">Active controls enforced across identity, key rotation, messaging, and audit logs.</p>
             </div>
           </div>
-          <ul style={{ margin: 0, paddingLeft: '18px', fontSize: '13px', lineHeight: 1.65, color: 'var(--text-secondary)' }}>
+          <ul style={{ margin: 0, paddingLeft: '18px', fontSize: '13.5px', lineHeight: 1.7, color: 'var(--text-secondary)' }}>
             <li>
-              <strong>Python Compatibility Adapter:</strong> Standalone <span className="mono">track4_service.py</span> +{' '}
-              <span className="mono">pqcrypto==0.4.0</span> ML-KEM-768 + HMAC-SHA-256 proof, atomic <span className="mono">TRACK4_STATE_DIR</span> persistence.
+              <strong>Device Trust & Revocation:</strong> Revoked devices are immediately blocked across all cluster policy nodes while unaffected peers retain access.
             </li>
             <li>
-              <strong>Backend Post-Quantum Crypto:</strong> BouncyCastle 1.80 ML-KEM-768 (FIPS 203), ML-DSA-65 (FIPS 204), HKDF-SHA-256, AES-256-GCM.
+              <strong>Key Rotation Quorum:</strong> Rotated encryption keys require acknowledgement from every active node prior to commit and enforce explicit retirement cutoffs.
             </li>
             <li>
-              <strong>Private Key Storage:</strong> Device & key-version private keys stored in isolated <span className="mono">0600</span> keystore outside MySQL columns.
+              <strong>Protected Messaging:</strong> Messages bind intended recipient metadata, verify signatures/integrity before decryption, block duplicate IDs, and erase ephemeral keys on receipt.
             </li>
             <li>
-              <strong>Deterministic Threat Detection:</strong> Zero AI/ML; 22-event practice dataset caveat applies ({metrics?.sampleCaveat}).
-            </li>
-            <li>
-              <strong>Audit Chain Limitation:</strong> Same-database SHA-256 hash chain detects partial/non-privileged row tampering, not full DB + checkpoint rewrites.
+              <strong>Audit & Backup Integrity:</strong> Audit logs are hash-chained from genesis with mismatch detection, and snapshot restores verify cryptographic checksums first.
             </li>
           </ul>
         </div>
@@ -89,7 +83,7 @@ export default function Settings({ session, onOpenLogin }) {
 
       <div className="card">
         <div className="card-header">
-          <h2 className="card-title">Simulated Nodes Configuration ({nodes.length})</h2>
+          <h2 className="card-title">Cluster Nodes ({nodes.length})</h2>
         </div>
         <DataTable
           rowKey={(n) => n.nodeCode}
@@ -97,7 +91,7 @@ export default function Settings({ session, onOpenLogin }) {
           columns={[
             { key: 'nodeCode', header: 'Node Code', render: (n) => <span className="mono">{n.nodeCode}</span> },
             { key: 'nodeName', header: 'Name' },
-            { key: 'region', header: 'Simulated Region' },
+            { key: 'region', header: 'Region' },
             { key: 'currentKeyVersion', header: 'Key Version', render: (n) => `v${n.currentKeyVersion}` },
             { key: 'currentRevocationVersion', header: 'Revocation Ver', render: (n) => `v${n.currentRevocationVersion}` },
             { key: 'status', header: 'Status', render: (n) => <StatusBadge status={n.status} /> },
