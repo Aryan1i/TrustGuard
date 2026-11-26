@@ -34,14 +34,12 @@ export default function LoginModal({ open, onClose, onAuthenticated, standalone 
   const formContent = (
     <>
       <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '12px' }}>
-        <div className="rail-logo" style={{ marginBottom: 0 }}>
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
-            <path d="M12 2L4 5.5V11.5C4 16.8 7.4 21.5 12 23C16.6 21.5 20 16.8 20 11.5V5.5L12 2Z" stroke="#FFFFFF" strokeWidth="2" />
-            <path d="M9 12.2L11 14.2L15.5 9.7" stroke="#FFFFFF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-          </svg>
-        </div>
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <path d="M12 2L4 5.5V11.5C4 16.8 7.4 21.5 12 23C16.6 21.5 20 16.8 20 11.5V5.5L12 2Z" fill="#3fa66c" />
+          <path d="M9 12.2L11 14.2L15.5 9.7" stroke="#ffffff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
         <div>
-          <h2 style={{ margin: 0, fontSize: '18px' }}>TrustGuard Sign In</h2>
+          <h2 style={{ margin: 0, fontSize: '18px' }}>TRUSTGUARD Sign In</h2>
           <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
             Identity & Security Operations Console
           </div>

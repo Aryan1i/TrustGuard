@@ -1,21 +1,21 @@
-import React, { useState } from 'react';
+import React from 'react';
 import { NavLink } from 'react-router-dom';
 
 export const MODULES = [
-  { to: '/', label: 'Dashboard', category: 'Security', sub: 'Overview • Live Posture' },
-  { to: '/devices', label: 'Devices', category: 'Security', sub: 'Identity • Revocation' },
-  { to: '/keys', label: 'Key Management', category: 'Security', sub: 'Lifecycle • Quorum' },
-  { to: '/access', label: 'Access Monitor', category: 'Security', sub: 'Zero-Trust • Policy' },
-  { to: '/threats', label: 'Threat Detection', category: 'Security', sub: 'Rules • Security Alerts' },
-  { to: '/audit', label: 'Audit Logs', category: 'Ops', sub: 'Integrity • Verification' },
-  { to: '/messaging', label: 'Secure Messaging', category: 'Ops', sub: 'Encrypted • Channels' },
-  { to: '/recovery', label: 'Backup & Recovery', category: 'Ops', sub: 'Snapshots • Restore' },
-  { to: '/settings', label: 'Settings', category: 'Ops', sub: 'Nodes • Configuration' },
+  { to: '/', label: 'Dashboard', group: 'Main menu' },
+  { to: '/devices', label: 'Devices', group: 'Main menu' },
+  { to: '/keys', label: 'Key Management', group: 'Main menu' },
+  { to: '/access', label: 'Access Monitor', group: 'Main menu' },
+  { to: '/threats', label: 'Threat Detection', group: 'Main menu' },
+  { to: '/audit', label: 'Audit Logs', group: 'Security' },
+  { to: '/messaging', label: 'Secure Messaging', group: 'Security' },
+  { to: '/recovery', label: 'Backup & Recovery', group: 'Security' },
+  { to: '/settings', label: 'Settings', group: 'Admin' },
 ];
 
-function RailIcon({ path }) {
+function MenuIcon({ path }) {
   const icons = {
-    '/': <path d="M4 4h7v7H4V4zm9 0h7v7h-7V4zM4 13h7v7H4v-7zm9 0h7v7h-7v-7z" />,
+    '/': <path d="M3 10.5L12 3l9 7.5V20a1 1 0 01-1 1h-5v-6H9v6H4a1 1 0 01-1-1v-9.5z" />,
     '/devices': <path d="M4 6h16v10H4V6zm6 12h4m-6 2h8" />,
     '/keys': <path d="M15 7a4 4 0 10-3.87 5H6v3h3v3h3v-2.13A4 4 0 0015 7z" />,
     '/access': <path d="M12 2l7 3.5V11c0 5-3.3 9.3-7 11-3.7-1.7-7-6-7-11V5.5L12 2z" />,
@@ -27,118 +27,71 @@ function RailIcon({ path }) {
   };
 
   return (
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
       {icons[path]}
     </svg>
   );
 }
 
-export default function Sidebar({ session, onOpenLogin }) {
-  const [search, setSearch] = useState('');
-  const [tab, setTab] = useState('All');
-
-  const filteredModules = MODULES.filter((m) => {
-    const matchTab = tab === 'All' || m.category === tab;
-    const q = search.trim().toLowerCase();
-    const matchSearch = !q || m.label.toLowerCase().includes(q) || m.sub.toLowerCase().includes(q);
-    return matchTab && matchSearch;
-  });
+export default function Sidebar({ session, onOpenLogin, onLogout }) {
+  const groups = ['Main menu', 'Security', 'Admin'];
 
   return (
-    <>
-      <aside className="icon-rail" aria-label="Icon Navigation">
-        <div className="rail-top">
-          <div className="rail-logo" title="TrustGuard">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
-              <path d="M12 2L4 5.5V11.5C4 16.8 7.4 21.5 12 23C16.6 21.5 20 16.8 20 11.5V5.5L12 2Z" stroke="#FFFFFF" strokeWidth="2" />
-              <path d="M9 12.2L11 14.2L15.5 9.7" stroke="#FFFFFF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-            </svg>
-          </div>
-          {MODULES.map((m) => (
-            <NavLink
-              key={m.to}
-              to={m.to}
-              end={m.to === '/'}
-              title={m.label}
-              className={({ isActive }) => `rail-btn${isActive ? ' active' : ''}`}
-            >
-              <RailIcon path={m.to} />
-            </NavLink>
-          ))}
-        </div>
-
-        <div className="rail-bottom">
-          <button
-            type="button"
-            className="avatar-circle"
-            title={`Signed in as ${session?.username || 'user'}`}
-            onClick={onOpenLogin}
-          >
-            {(session?.username || 'TG').slice(0, 2).toUpperCase()}
-          </button>
-        </div>
-      </aside>
-
-      <aside className="module-drawer" aria-label="All Modules">
-        <h2 className="drawer-title">All Modules</h2>
-
-        <div className="drawer-search">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#6b7280" strokeWidth="2">
-            <circle cx="11" cy="11" r="8" />
-            <path d="M21 21l-4.35-4.35" />
+    <aside className="sidebar" aria-label="Primary Navigation">
+      <div className="sidebar-top">
+        <NavLink to="/" className="sidebar-brand">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path d="M12 2L4 5.5V11.5C4 16.8 7.4 21.5 12 23C16.6 21.5 20 16.8 20 11.5V5.5L12 2Z" fill="#3fa66c" />
+            <path d="M9 12.2L11 14.2L15.5 9.7" stroke="#ffffff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
-          <input
-            type="text"
-            placeholder="Search Module"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-          />
+          <span className="sidebar-wordmark">TRUSTGUARD</span>
+        </NavLink>
+      </div>
+
+      <nav className="sidebar-nav">
+        {groups.map((group) => (
+          <div key={group}>
+            <div className="sidebar-section-label">{group}</div>
+            {MODULES.filter((m) => m.group === group).map((m) => (
+              <NavLink
+                key={m.to}
+                to={m.to}
+                end={m.to === '/'}
+                className={({ isActive }) => `sidebar-link${isActive ? ' active' : ''}`}
+              >
+                <MenuIcon path={m.to} />
+                <span>{m.label}</span>
+              </NavLink>
+            ))}
+          </div>
+        ))}
+      </nav>
+
+      <div className="sidebar-footer">
+        <div className="sidebar-user-row">
+          <div className="avatar-circle">
+            {(session?.username || 'TG').slice(0, 2).toUpperCase()}
+          </div>
+          <div className="sidebar-user-meta">
+            <div className="sidebar-user-name">{session?.displayName || session?.username}</div>
+            <div className="sidebar-user-email">{session?.username}@trustguard.local</div>
+          </div>
+          <button
+            type="button"
+            className="icon-btn icon-btn-ghost"
+            title="Sign out"
+            onClick={onLogout}
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4m7 14l5-5-5-5m5 5H9" />
+            </svg>
+          </button>
         </div>
 
-        <div className="drawer-filter-pills">
-          <button
-            type="button"
-            className={`filter-pill${tab === 'All' ? ' active' : ''}`}
-            onClick={() => setTab('All')}
-          >
-            Active({String(MODULES.length).padStart(2, '0')})
-          </button>
-          <button
-            type="button"
-            className={`filter-pill${tab === 'Security' ? ' active' : ''}`}
-            onClick={() => setTab('Security')}
-          >
-            Security(05)
-          </button>
-          <button
-            type="button"
-            className={`filter-pill${tab === 'Ops' ? ' active' : ''}`}
-            onClick={() => setTab('Ops')}
-          >
-            Ops(04)
-          </button>
-        </div>
-
-        <div className="drawer-list">
-          {filteredModules.map((m) => (
-            <NavLink
-              key={m.to}
-              to={m.to}
-              end={m.to === '/'}
-              className={({ isActive }) => `drawer-item${isActive ? ' active' : ''}`}
-            >
-              <div className="drawer-item-icon">
-                <RailIcon path={m.to} />
-              </div>
-              <div className="drawer-item-body">
-                <div className="drawer-item-title">{m.label}</div>
-                <div className="drawer-item-sub">{m.sub}</div>
-              </div>
-              <span style={{ color: '#9ca3af', fontSize: '14px' }}>›</span>
-            </NavLink>
-          ))}
-        </div>
-      </aside>
-    </>
+        <button type="button" className="btn btn-secondary" style={{ width: '100%' }} onClick={onOpenLogin}>
+          Switch Account
+        </button>
+      </div>
+    </aside>
   );
 }

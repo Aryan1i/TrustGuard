@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { api } from '../api';
+import StatCard from '../components/StatCard';
 import DataTable from '../components/DataTable';
-import StatusBadge from '../components/StatusBadge';
+import StatusBadge, { DotStatus } from '../components/StatusBadge';
 import ConfirmModal from '../components/ConfirmModal';
 import LoadingState from '../components/LoadingState';
 
@@ -9,6 +10,8 @@ export default function Devices({ session }) {
   const [devices, setDevices] = useState([]);
   const [users, setUsers] = useState([]);
   const [nodes, setNodes] = useState([]);
+  const [statusTab, setStatusTab] = useState('ALL');
+  const [showEnrolForm, setShowEnrolForm] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
@@ -55,6 +58,7 @@ export default function Devices({ session }) {
       setNotice(`Enrolled device ${created.deviceUid} for ${created.ownerUsername}`);
       setDeviceName('');
       setReplacesDeviceId('');
+      setShowEnrolForm(false);
       await loadAll();
     } catch (err) {
       setError(err.message);
@@ -72,8 +76,7 @@ export default function Devices({ session }) {
       const res = await api.revokeDevice(revokeTarget.id, revokeReason);
       setNotice(
         `Revoked ${res.device.deviceUid} (revocation v${res.revocationVersion}). ` +
-          `Propagated to ${res.nodesEnforced}/${res.totalNodes} nodes in ${res.propagationLatencyMs} ms. ` +
-          `Other users' permissions remain active.`
+          `Propagated across ${res.nodesEnforced}/${res.totalNodes} nodes in ${res.propagationLatencyMs} ms.`
       );
       setRevokeTarget(null);
       await loadAll();
@@ -86,17 +89,74 @@ export default function Devices({ session }) {
 
   if (loading && devices.length === 0) return <LoadingState />;
 
+  const activeCount = devices.filter((d) => d.status === 'ACTIVE').length;
+  const revokedCount = devices.filter((d) => d.status === 'REVOKED').length;
+  const onlineNodes = nodes.filter((n) => n.status === 'ONLINE').length;
+
+  const visibleDevices = devices.filter((d) => {
+    if (statusTab === 'ACTIVE') return d.status === 'ACTIVE';
+    if (statusTab === 'REVOKED') return d.status === 'REVOKED';
+    return true;
+  });
+
   return (
     <div>
+      <div className="page-subheader">
+        <h2 className="page-subheader-title">Device List</h2>
+        <div className="flex-row">
+          <button
+            type="button"
+            className="btn btn-primary"
+            onClick={() => setShowEnrolForm((v) => !v)}
+          >
+            {showEnrolForm ? 'Close Form' : '+ Enrol Device'}
+          </button>
+          <button type="button" className="btn btn-secondary" onClick={loadAll}>
+            Refresh
+          </button>
+        </div>
+      </div>
+
       {error && <div className="banner banner-danger">{error}</div>}
       {notice && <div className="banner banner-success">{notice}</div>}
 
-      <div className="grid grid-2 section-gap">
-        <div className="card">
+      <div className="grid grid-4 section-gap">
+        <StatCard
+          label="Total Devices"
+          value={devices.length}
+          delta={`${users.length} owners`}
+          deltaTone="up"
+          meta="Registered identities"
+        />
+        <StatCard
+          label="Active Devices"
+          value={activeCount}
+          delta={devices.length ? `${Math.round((activeCount / devices.length) * 100)}%` : '0%'}
+          deltaTone="up"
+          meta="Authorized for access"
+        />
+        <StatCard
+          label="Revoked Devices"
+          value={revokedCount}
+          delta={revokedCount > 0 ? 'Blocked' : '0 blocked'}
+          deltaTone={revokedCount > 0 ? 'down' : 'neutral'}
+          meta="Rejected on all nodes"
+        />
+        <StatCard
+          label="Enforcing Nodes"
+          value={`${onlineNodes} / ${nodes.length}`}
+          delta="Synced"
+          deltaTone="up"
+          meta="Cluster revocation state"
+        />
+      </div>
+
+      {showEnrolForm && (
+        <div className="card section-gap">
           <div className="card-header">
             <div>
               <h2 className="card-title">Enroll / Replace Device</h2>
-              <p className="card-subtitle">Issues a new cryptographic device identity and public key fingerprint.</p>
+              <p className="card-subtitle">Creates a new device credential and public key fingerprint.</p>
             </div>
           </div>
           <form onSubmit={handleEnrol}>
@@ -143,61 +203,51 @@ export default function Devices({ session }) {
             </button>
           </form>
         </div>
-
-        <div className="card">
-          <div className="card-header">
-            <div>
-              <h2 className="card-title">Cluster Node Enforcement</h2>
-              <p className="card-subtitle">All policy enforcement nodes synchronize revocation versions automatically.</p>
-            </div>
-          </div>
-          <DataTable
-            rowKey={(n) => n.nodeCode}
-            rows={nodes}
-            columns={[
-              { key: 'nodeCode', header: 'Node', render: (n) => <span className="mono">{n.nodeCode}</span> },
-              { key: 'status', header: 'Status', render: (n) => <StatusBadge status={n.status} /> },
-              { key: 'currentRevocationVersion', header: 'Revocation Ver', render: (n) => `v${n.currentRevocationVersion}` },
-              {
-                key: 'lastPropagationMs',
-                header: 'Propagation',
-                render: (n) => (n.lastPropagationMs != null ? `${n.lastPropagationMs} ms` : '—'),
-              },
-            ]}
-          />
-        </div>
-      </div>
+      )}
 
       <div className="card section-gap">
-        <div className="card-header">
-          <h2 className="card-title">Registered Devices ({devices.length})</h2>
-          <button type="button" className="btn btn-secondary btn-sm" onClick={loadAll}>
-            Refresh
-          </button>
-        </div>
         <DataTable
+          searchable
+          searchPlaceholder="Search device report"
+          activeTab={statusTab}
+          onTabChange={setStatusTab}
+          tabs={[
+            { id: 'ALL', label: `All devices (${devices.length})` },
+            { id: 'ACTIVE', label: `Active (${activeCount})` },
+            { id: 'REVOKED', label: `Revoked (${revokedCount})` },
+          ]}
           rowKey={(d) => d.id}
-          rows={devices}
+          rows={visibleDevices}
           columns={[
-            { key: 'ownerUsername', header: 'Owner', render: (d) => <strong>{d.ownerUsername}</strong> },
-            { key: 'deviceUid', header: 'Device ID', render: (d) => <span className="mono">{d.deviceUid}</span> },
-            { key: 'deviceName', header: 'Device Name' },
+            { key: 'no', header: 'No.', render: (_, idx) => idx + 1 },
+            { key: 'deviceUid', header: 'Device Id', render: (d) => <span className="mono">{d.deviceUid}</span> },
+            { key: 'deviceName', header: 'Device', render: (d) => <strong>{d.deviceName}</strong> },
+            { key: 'ownerUsername', header: 'Owner', render: (d) => d.ownerUsername },
             {
               key: 'publicKeyFingerprint',
-              header: 'Public Key Fingerprint',
-              render: (d) => <span className="mono">{d.publicKeyFingerprint?.slice(0, 16)}…</span>,
+              header: 'Key Fingerprint',
+              render: (d) => <span className="mono">{d.publicKeyFingerprint?.slice(0, 12)}…</span>,
             },
             {
               key: 'enrolledAt',
               header: 'Enrolled',
-              render: (d) => <span className="mono">{new Date(d.enrolledAt).toISOString()}</span>,
+              render: (d) => <span className="mono">{new Date(d.enrolledAt).toISOString().slice(0, 10)}</span>,
             },
             {
-              key: 'lastSeenAt',
-              header: 'Last Seen',
-              render: (d) => <span className="mono">{new Date(d.lastSeenAt).toISOString()}</span>,
+              key: 'trust',
+              header: 'Trust',
+              render: (d) => (
+                <DotStatus
+                  label={d.status === 'ACTIVE' ? 'Trusted' : 'Blocked'}
+                  tone={d.status === 'ACTIVE' ? 'green' : 'red'}
+                />
+              ),
             },
-            { key: 'status', header: 'Status', render: (d) => <StatusBadge status={d.status} /> },
+            {
+              key: 'status',
+              header: 'Status',
+              render: (d) => <StatusBadge status={d.status === 'ACTIVE' ? 'Active' : 'Revoked'} variant={d.status === 'ACTIVE' ? 'success' : 'danger'} />,
+            },
             {
               key: 'actions',
               header: 'Actions',
@@ -220,10 +270,34 @@ export default function Devices({ session }) {
         />
       </div>
 
+      <div className="card">
+        <div className="card-header">
+          <div>
+            <h2 className="card-title">Cluster Node Enforcement</h2>
+            <p className="card-subtitle">Revocation versions enforced per node.</p>
+          </div>
+        </div>
+        <DataTable
+          rowKey={(n) => n.nodeCode}
+          rows={nodes}
+          columns={[
+            { key: 'nodeCode', header: 'Node', render: (n) => <span className="mono">{n.nodeCode}</span> },
+            { key: 'nodeName', header: 'Node Name' },
+            { key: 'currentRevocationVersion', header: 'Revocation Ver', render: (n) => `v${n.currentRevocationVersion}` },
+            {
+              key: 'lastPropagationMs',
+              header: 'Propagation',
+              render: (n) => (n.lastPropagationMs != null ? `${n.lastPropagationMs} ms` : '—'),
+            },
+            { key: 'status', header: 'Status', render: (n) => <StatusBadge status={n.status} /> },
+          ]}
+        />
+      </div>
+
       <ConfirmModal
         open={Boolean(revokeTarget)}
         title={`Revoke Device ${revokeTarget?.deviceUid || ''}?`}
-        message={`This will revoke ${revokeTarget?.ownerUsername}'s device across all policy nodes, increment the revocation version, and leave other users' devices unaffected.`}
+        message={`This revokes ${revokeTarget?.ownerUsername}'s device across all policy nodes while keeping other users' devices active.`}
         confirmLabel="Confirm Revocation"
         danger
         busy={submitting}

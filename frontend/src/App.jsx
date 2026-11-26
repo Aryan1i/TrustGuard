@@ -15,15 +15,15 @@ import Recovery from './pages/Recovery';
 import Settings from './pages/Settings';
 
 const PAGE_TITLES = {
-  '/': 'TrustGuard Security Hub',
-  '/devices': 'Identity & Device Management',
+  '/': 'Security Dashboard',
+  '/devices': 'Device Management',
   '/keys': 'Key Management',
   '/access': 'Access Monitor',
-  '/threats': 'Threat Detection & Alerts',
+  '/threats': 'Threat Detection',
   '/audit': 'Audit Logs',
   '/messaging': 'Secure Messaging',
   '/recovery': 'Backup & Recovery',
-  '/settings': 'Platform Settings',
+  '/settings': 'Settings',
 };
 
 function AppShell() {
@@ -60,19 +60,19 @@ function AppShell() {
   }
 
   const title = PAGE_TITLES[location.pathname] || 'TrustGuard';
+  const handleLogout = () => {
+    clearSession();
+    setSession(null);
+  };
 
   return (
     <div className="app-shell">
-      <Sidebar session={session} onOpenLogin={() => setLoginOpen(true)} />
+      <Sidebar session={session} onOpenLogin={() => setLoginOpen(true)} onLogout={handleLogout} />
       <div className="main-column">
         <Navbar
           title={title}
           session={session}
           onOpenLogin={() => setLoginOpen(true)}
-          onLogout={() => {
-            clearSession();
-            setSession(null);
-          }}
         />
         <main className="page-content">
           <Routes>

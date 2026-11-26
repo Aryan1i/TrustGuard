@@ -1,77 +1,63 @@
-import React from 'react';
-import { NavLink } from 'react-router-dom';
-import StatusBadge from './StatusBadge';
-import { MODULES } from './Sidebar';
+import React, { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 
-const IDENTITIES = [
-  { key: 'AD', name: 'admin', bg: '#1d4ed8' },
-  { key: 'AL', name: 'alice', bg: '#7c3aed' },
-  { key: 'BO', name: 'bob', bg: '#0f766e' },
-  { key: 'CH', name: 'charlie', bg: '#b45309' },
-];
+export default function Navbar({ title, session, onOpenLogin }) {
+  const [query, setQuery] = useState('');
+  const navigate = useNavigate();
 
-export default function Navbar({ title, session, onLogout, onOpenLogin }) {
+  const handleSearch = (e) => {
+    e.preventDefault();
+    const q = query.trim().toLowerCase();
+    if (!q) return;
+    if (q.includes('dev') || q.includes('revok')) navigate('/devices');
+    else if (q.includes('key') || q.includes('rotat')) navigate('/keys');
+    else if (q.includes('access')) navigate('/access');
+    else if (q.includes('alert') || q.includes('threat')) navigate('/threats');
+    else if (q.includes('audit') || q.includes('log')) navigate('/audit');
+    else if (q.includes('msg') || q.includes('messag')) navigate('/messaging');
+    else if (q.includes('bak') || q.includes('recover')) navigate('/recovery');
+    else navigate('/');
+  };
+
   return (
     <header className="top-header">
-      <div className="top-header-row">
-        <div>
-          <h1 className="page-heading">
-            <span>{title}</span>
-            <span style={{ fontSize: '16px' }}>⚡</span>
-          </h1>
-          <div className="page-breadcrumb">
-            TrustGuard / Security Operations / {title}
-          </div>
-        </div>
+      <h1 className="top-header-title">{title}</h1>
 
-        <div className="header-controls">
-          <StatusBadge status="ACTIVE" variant="success" />
+      <div className="top-header-right">
+        <form className="header-search" onSubmit={handleSearch}>
+          <input
+            type="text"
+            placeholder="Search devices, users, or alerts"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+          />
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#6b7280" strokeWidth="2">
+            <circle cx="11" cy="11" r="8" />
+            <path d="M21 21l-4.35-4.35" />
+          </svg>
+        </form>
 
-          <div className="avatar-stack" title="Switch active user account">
-            {IDENTITIES.map((id) => (
-              <button
-                key={id.name}
-                type="button"
-                className="avatar-stack-item"
-                style={{
-                  background: id.bg,
-                  outline: session?.username === id.name ? '2px solid #1d4ed8' : 'none',
-                }}
-                onClick={onOpenLogin}
-                title={`Active: ${session?.username} — click to switch`}
-              >
-                {id.key}
-              </button>
-            ))}
-          </div>
+        <button
+          type="button"
+          className="icon-btn"
+          title="View Security Alerts"
+          onClick={() => navigate('/threats')}
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M18 8a6 6 0 00-12 0c0 7-3 9-3 9h18s-3-2-3-9m-4.27 13a2 2 0 01-3.46 0" />
+          </svg>
+        </button>
 
-          <button
-            type="button"
-            className="btn btn-secondary btn-sm"
-            onClick={onOpenLogin}
-            title="Switch Account"
-          >
-            {session?.username} ({session?.role})
-          </button>
-
-          <button type="button" className="btn btn-secondary btn-sm" onClick={onLogout}>
-            Sign Out
-          </button>
-        </div>
+        <button
+          type="button"
+          className="avatar-circle"
+          style={{ border: 'none', cursor: 'pointer' }}
+          title={`Signed in as ${session?.username} (${session?.role})`}
+          onClick={onOpenLogin}
+        >
+          {(session?.username || 'TG').slice(0, 2).toUpperCase()}
+        </button>
       </div>
-
-      <nav className="underline-tabs" aria-label="Workspace Tabs">
-        {MODULES.map((m) => (
-          <NavLink
-            key={m.to}
-            to={m.to}
-            end={m.to === '/'}
-            className={({ isActive }) => `underline-tab${isActive ? ' active' : ''}`}
-          >
-            {m.label}
-          </NavLink>
-        ))}
-      </nav>
     </header>
   );
 }
