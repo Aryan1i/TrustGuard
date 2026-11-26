@@ -24,9 +24,9 @@ TrustGuard combines a standalone Python 3.12 compatibility adapter (`track4_serv
 
 ### Accessible five-minute fallback video link
 
-**Video link:** `[INSERT PUBLIC 5-MIN DEMO VIDEO URL — confirm anonymous viewer access before final upload]`  
+**Video link:** https://drive.google.com/file/d/1S8TA3p2WuIDA48RbVJCvlQ8nB1tCQF4u/view?usp=sharing  
 **Duration:** 5 minutes (follows `docs/demo-script.md`)  
-**Access checked:** Verify anonymous viewing without login prior to Track 4 portal upload.
+**Access checked:** Shared via Google Drive link (`usp=sharing`).
 
 The walkthrough demonstrates: (1) `validate.py` passing `21/21` checks + `test_adapter.py` (`6/6`, `1.993 s`) verifying `ML-KEM-768` `protected_read` and log-injection containment; (2) device revocation across `3/3` nodes (`7–11 ms` measured live propagation) + immediate `tokenVersion` JWT invalidation while preserving peer `bob`; (3) blocked key commit during simulated outage, quorum commit (`60 s` default grace / `0 s` cutoff test), and crash-recovery persistence for both committed `v2` and uncommitted-rotation rollback (`2.430 s`); (4) deterministic detection scoring `22/22` in `0.006 s` (`F1=1.0`, `falseAlertsPer1000Benign=0.0`, `n=22` caveat, `±30,000 ms` clock-skew bounds, slow-and-low probes); and (5) audit tamper mismatch detection, HMAC+SHA-256 backup rejection, and replay/recipient/inactive-sender blocking.
 
