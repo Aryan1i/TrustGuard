@@ -130,7 +130,9 @@ Open `http://localhost:5173`. Vite proxies `/api/*` directly to `http://localhos
 
 ### Deploying Frontend to Vercel
 
-`frontend/vercel.json` is configured for Vite SPA routing (`npm run build` -> `dist/`). Import the repository in Vercel with **Root Directory** set to `frontend`, and set `VITE_API_BASE_URL` to your hosted Spring Boot backend URL (the backend itself requires a Java 21 / persistent JVM host such as Render, Railway, Fly.io, or Docker, since Vercel does not run persistent Java Spring Boot servers).
+Both root-level [vercel.json](vercel.json) and [frontend/vercel.json](frontend/vercel.json) are configured for Vite SPA routing, so deploying from either the repository root or `frontend` builds cleanly into `dist/`.
+- If `VITE_API_BASE_URL` is **not** set on Vercel (static frontend only), the app automatically activates **Vercel Standalone Mode** using browser WebCrypto (`AES-256-GCM`, `SHA-256`), persistent `localStorage`, and the 22-event deterministic detection engine so authentication and all 9 views work immediately.
+- To connect the full Java 21 / Spring Boot / BouncyCastle `ML-KEM-768` & `ML-DSA-65` backend, deploy `backend/` to a JVM host (Render, Railway, Fly.io, or Docker) and set `VITE_API_BASE_URL` in Vercel environment variables.
 
 ### Synthetic Demo Identities
 

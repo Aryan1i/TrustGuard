@@ -13,12 +13,12 @@ const STATUS_CLASS_MAP = {
   RESTORED: 'badge-success',
   RESUMED: 'badge-success',
   LOW: 'badge-info',
-  INFO: 'badge-info',
+  INFO: 'badge-lavender',
   PREPARED: 'badge-info',
   DISTRIBUTED: 'badge-warning',
   PENDING: 'badge-warning',
   DEGRADED: 'badge-warning',
-  RETIRED: 'badge-warning',
+  RETIRED: 'badge-pink',
   MEDIUM: 'badge-warning',
   CLOSED: 'badge-neutral',
   NOT_RESTORED: 'badge-neutral',
@@ -34,7 +34,7 @@ const STATUS_CLASS_MAP = {
   HIGH: 'badge-danger',
   DENIED_ATTEMPT: 'badge-warning',
   CONFIRMED_VIOLATION: 'badge-danger',
-  NEEDS_REVIEW: 'badge-warning',
+  NEEDS_REVIEW: 'badge-pink',
 };
 
 export default function StatusBadge({ status, variant }) {

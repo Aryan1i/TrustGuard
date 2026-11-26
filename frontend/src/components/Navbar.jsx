@@ -1,33 +1,86 @@
 import React from 'react';
+import { NavLink } from 'react-router-dom';
 import StatusBadge from './StatusBadge';
+import { MODULES } from './Sidebar';
 
-export default function Navbar({ title, session, onLogout, onOpenLogin }) {
+const IDENTITIES = [
+  { key: 'AD', name: 'admin', bg: '#1d4ed8' },
+  { key: 'AL', name: 'alice', bg: '#7c3aed' },
+  { key: 'BO', name: 'bob', bg: '#0f766e' },
+  { key: 'CH', name: 'charlie', bg: '#b45309' },
+];
+
+export default function Navbar({ title, session, runtimeMode, onLogout, onOpenLogin }) {
   return (
-    <header className="navbar">
-      <div className="navbar-title-wrap">
-        <h1 className="navbar-title">{title}</h1>
-        <StatusBadge status="SYNTHETIC LAB" variant="info" />
+    <header className="top-header">
+      <div className="top-header-row">
+        <div>
+          <h1 className="page-heading">
+            <span>{title}</span>
+            <span style={{ fontSize: '16px' }}>⚡</span>
+          </h1>
+          <div className="page-breadcrumb">
+            TrustGuard / Track 4: Trust, but verify / {title}
+          </div>
+        </div>
+
+        <div className="header-controls">
+          <StatusBadge
+            status={
+              runtimeMode === 'backend'
+                ? 'Spring Boot Backend'
+                : runtimeMode === 'standalone'
+                ? 'Vercel Standalone Mode'
+                : 'Connecting...'
+            }
+            variant={runtimeMode === 'backend' ? 'success' : 'lavender'}
+          />
+
+          <div className="avatar-stack" title="Synthetic identities (click to switch)">
+            {IDENTITIES.map((id) => (
+              <button
+                key={id.name}
+                type="button"
+                className="avatar-stack-item"
+                style={{
+                  background: id.bg,
+                  outline: session?.username === id.name ? '2px solid #1d4ed8' : 'none',
+                }}
+                onClick={onOpenLogin}
+                title={`Active: ${session?.username} — click to switch`}
+              >
+                {id.key}
+              </button>
+            ))}
+          </div>
+
+          <button
+            type="button"
+            className="btn btn-secondary btn-sm"
+            onClick={onOpenLogin}
+            title="Switch Authenticated Identity"
+          >
+            {session?.username} ({session?.role})
+          </button>
+
+          <button type="button" className="btn btn-secondary btn-sm" onClick={onLogout}>
+            Sign Out
+          </button>
+        </div>
       </div>
 
-      <div className="navbar-actions">
-        {session ? (
-          <>
-            <span style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
-              Signed in as <strong>{session.username}</strong> ({session.role})
-            </span>
-            <button type="button" className="btn btn-secondary btn-sm" onClick={onOpenLogin}>
-              Switch Identity
-            </button>
-            <button type="button" className="btn btn-secondary btn-sm" onClick={onLogout}>
-              Sign Out
-            </button>
-          </>
-        ) : (
-          <button type="button" className="btn btn-primary btn-sm" onClick={onOpenLogin}>
-            Sign In
-          </button>
-        )}
-      </div>
+      <nav className="underline-tabs" aria-label="Workspace Tabs">
+        {MODULES.map((m) => (
+          <NavLink
+            key={m.to}
+            to={m.to}
+            end={m.to === '/'}
+            className={({ isActive }) => `underline-tab${isActive ? ' active' : ''}`}
+          >
+            {m.label}
+          </NavLink>
+        ))}
+      </nav>
     </header>
   );
 }

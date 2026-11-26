@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { api, saveSession } from '../api';
+import StatusBadge from './StatusBadge';
 
 const DEMO_USERS = [
   { username: 'admin', role: 'ADMIN', label: 'Admin (Operator)' },
@@ -8,7 +9,7 @@ const DEMO_USERS = [
   { username: 'charlie', role: 'USER', label: 'Charlie (Owner)' },
 ];
 
-export default function LoginModal({ open, onClose, onAuthenticated, standalone = false }) {
+export default function LoginModal({ open, onClose, onAuthenticated, standalone = false, runtimeMode = 'checking' }) {
   const [username, setUsername] = useState('admin');
   const [password, setPassword] = useState('TrustGuard!Demo2026');
   const [loading, setLoading] = useState(false);
@@ -33,30 +34,29 @@ export default function LoginModal({ open, onClose, onAuthenticated, standalone 
 
   const formContent = (
     <>
-      <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '12px' }}>
-        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-          <path
-            d="M12 2L4 5.5V11.5C4 16.8 7.4 21.5 12 23C16.6 21.5 20 16.8 20 11.5V5.5L12 2Z"
-            fill="#2563EB"
-          />
-          <path
-            d="M9 12.2L11 14.2L15.5 9.7"
-            stroke="#FFFFFF"
-            strokeWidth="2"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          />
-        </svg>
-        <div>
-          <h2 style={{ margin: 0, fontSize: '18px' }}>TrustGuard Sign In</h2>
-          <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
-            Track 4 · Authenticated JWT Identity Gateway
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+          <div className="rail-logo" style={{ marginBottom: 0 }}>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
+              <path d="M12 2L4 5.5V11.5C4 16.8 7.4 21.5 12 23C16.6 21.5 20 16.8 20 11.5V5.5L12 2Z" stroke="#FFFFFF" strokeWidth="2" />
+              <path d="M9 12.2L11 14.2L15.5 9.7" stroke="#FFFFFF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </div>
+          <div>
+            <h2 style={{ margin: 0, fontSize: '18px' }}>TrustGuard Sign In</h2>
+            <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
+              Track 4 · Identity & Access Console
+            </div>
           </div>
         </div>
+        <StatusBadge
+          status={runtimeMode === 'backend' ? 'Spring Boot' : 'Standalone Edge'}
+          variant={runtimeMode === 'backend' ? 'success' : 'lavender'}
+        />
       </div>
 
       <div className="banner banner-info" style={{ fontSize: '12px' }}>
-        Synthetic hackathon lab accounts only. Signing in issues a real server-verified HMAC-SHA-256 JWT token via Spring Security.
+        Synthetic hackathon identities only. Password: <span className="mono">TrustGuard!Demo2026</span>
       </div>
 
       {error && <div className="banner banner-danger">{error}</div>}
@@ -93,7 +93,7 @@ export default function LoginModal({ open, onClose, onAuthenticated, standalone 
             </button>
           )}
           <button type="submit" className="btn btn-primary" style={{ flex: 1 }} disabled={loading}>
-            {loading ? 'Authenticating...' : 'Authenticate'}
+            {loading ? 'Authenticating...' : 'Sign In'}
           </button>
         </div>
       </form>
