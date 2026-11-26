@@ -609,7 +609,7 @@ export const standaloneEngine = {
     const expiresAt = new Date(Date.now() + 8 * 3600 * 1000).toISOString();
     const sig = await sha256Hex(`${u.username}:${u.role}:${expiresAt}:${randomHex(8)}`);
     const token = `tg-standalone.${btoa(JSON.stringify({ sub: u.username, role: u.role, exp: expiresAt }))}.${sig.slice(0, 32)}`;
-    await appendAudit(state, u.username, 'AUTH_SIGN_IN', 'identity', `Authenticated standalone session for ${u.username} (${u.role})`);
+    await appendAudit(state, u.username, 'AUTH_SIGN_IN', 'identity', `Authenticated session for ${u.username} (${u.role})`);
     saveState(state);
     return {
       token,
@@ -1263,7 +1263,7 @@ export const standaloneEngine = {
 
     state.consumedMessageIds.push(messageId);
     msg.status = 'DELIVERED';
-    msg.verificationOutcome = 'VERIFIED_WEBCRYPTO_AES_GCM';
+    msg.verificationOutcome = 'VERIFIED_AEAD_ENVELOPE';
     msg.deliveredAt = new Date().toISOString();
     await appendAudit(state, caller.username, 'SECURE_MESSAGE_DELIVERED', messageId, 'Verified AES-256-GCM AAD, recorded replay guard, erased ephemeral key');
     saveState(state);
